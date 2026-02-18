@@ -335,6 +335,68 @@ async def fixture_rest_async_client(
         await client.close()
 
 
+@pytest.fixture(scope="function", name="rest_async_lookup_first")
+async def fixture_rest_async_lookup_first(
+    request: SubRequest,
+    loop: asyncio.AbstractEventLoop,
+    kafka_servers: KafkaServers,
+    registry_async_client: Client,
+) -> AsyncIterator[KafkaRest | None]:
+    """REST proxy with rest_lookup_schema_before_register=True (lookup before register)."""
+    rest_url = request.config.getoption("rest_url")
+    if rest_url:
+        yield None
+        return
+
+    config = Config()
+    config.admin_metadata_max_age = 2
+    config.bootstrap_uri = kafka_servers.bootstrap_servers[0]
+    config.producer_max_request_size = REST_PRODUCER_MAX_REQUEST_BYTES
+    config.rest_lookup_schema_before_register = True
+    config.waiting_time_before_acting_as_master_ms = 500
+    rest = KafkaRest(config=config)
+
+    assert rest.serializer.registry_client
+    rest.serializer.registry_client.client = registry_async_client
+    try:
+        yield rest
+    finally:
+        await rest.close()
+
+
+@pytest.fixture(scope="function", name="rest_async_lookup_first_client")
+async def fixture_rest_async_lookup_first_client(
+    request: SubRequest,
+    loop: asyncio.AbstractEventLoop,
+    rest_async_lookup_first: KafkaRest,
+    aiohttp_client: AiohttpClient,
+) -> AsyncIterator[Client]:
+    rest_url = request.config.getoption("rest_url")
+
+    if rest_url:
+        client = Client(server_uri=rest_url)
+    else:
+
+        async def get_client(**kwargs) -> TestClient:
+            return await aiohttp_client(rest_async_lookup_first.app)
+
+        client = Client(client_factory=get_client)
+
+    try:
+        await repeat_until_successful_request(
+            client.get,
+            "brokers",
+            json_data=None,
+            headers=None,
+            error_msg="REST API is unreachable",
+            timeout=10,
+            sleep=0.3,
+        )
+        yield client
+    finally:
+        await client.close()
+
+
 @pytest.fixture(scope="function", name="rest_async_novalidation")
 async def fixture_rest_async_novalidation(
     request: SubRequest,
