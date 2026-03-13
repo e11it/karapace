@@ -5,6 +5,8 @@ Copyright (c) 2023 Aiven Ltd
 See LICENSE for details
 """
 
+from datetime import datetime, timezone
+
 import pytest
 
 from karapace.core.config import Config, InvalidConfiguration
