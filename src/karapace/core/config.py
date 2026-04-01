@@ -117,6 +117,7 @@ class Config(BaseSettings):
     rest_authorization: bool = False
     rest_base_uri: str | None = None
     rest_lookup_schema_before_register: bool = False
+    rest_avro_extended_json_parser: bool = False
     log_handler: str | None = "stdout"
     log_level: str = "DEBUG"
     log_format: str = "%(name)-20s\t%(threadName)s\t%(levelname)-8s\t%(message)s"
