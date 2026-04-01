@@ -6,8 +6,12 @@ See LICENSE for details
 from collections.abc import Awaitable, Callable
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
-from karapace.api.content_type import check_schema_headers
 from karapace.api.telemetry.middleware import setup_telemetry_middleware
+from karapace.core.instrumentation.path_normalization import normalize_path
+from prometheus_client import Counter, Histogram
+from prometheus_fastapi_instrumentator import Instrumentator
+from prometheus_fastapi_instrumentator.metrics import Info
+from prometheus_fastapi_instrumentator.metrics import default as default_metrics
 
 from karapace.api.oidc.middleware import OIDCMiddleware
 from karapace.core.auth import AuthenticationError
@@ -25,23 +29,6 @@ def setup_middlewares(app: FastAPI, config: Config) -> None:
         # Skip schema-registry header checks and Content-Type override for docs (Swagger UI, ReDoc, OpenAPI JSON).
         if request.url.path in {"/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"}:
             return await call_next(request)
-
-        try:
-            response_content_type = check_schema_headers(request)
-        except HTTPException as exc:
-            return JSONResponse(
-                status_code=exc.status_code,
-                headers=exc.headers,
-                content=exc.detail,
-            )
-
-        # Schema registry supports application/octet-stream, assumption is JSON object body.
-        # Force internally to use application/json in this case for compatibility.
-        if request.headers.get("Content-Type") == "application/octet-stream":
-            new_headers = request.headers.mutablecopy()
-            new_headers["Content-Type"] = "application/json"
-            request._headers = new_headers
-            request.scope.update(headers=request.headers.raw)
 
         # Check for skip paths like /_health and /metrics and bypass
         if request.url.path in config.sasl_oauthbearer_skip_auth_paths:
@@ -79,7 +66,58 @@ def setup_middlewares(app: FastAPI, config: Config) -> None:
                 )
 
         response = await call_next(request)
-        response.headers["Content-Type"] = response_content_type
+
+        content_type = getattr(request.state, "schema_response_content_type", None)
+        if content_type:
+            response.headers["Content-Type"] = content_type
+
         return response
 
     setup_telemetry_middleware(app=app)
+
+    # Metrics via prometheus-fastapi-instrumentator.
+    # .add() before .instrument(): Starlette defers middleware construction, so if the
+    # instrumentations list is non-empty the middleware skips its built-in defaults.
+    # We include default_metrics() explicitly to get both standard and karapace_* names.
+    instrumentator = Instrumentator(
+        should_group_status_codes=False,
+        should_instrument_requests_inprogress=True,
+        excluded_handlers=["/metrics"],
+        inprogress_labels=True,
+    )
+    instrumentator.add(
+        default_metrics(),
+        _karapace_requests_total(),
+        _karapace_requests_duration(),
+    )
+    instrumentator.instrument(app).expose(app, include_in_schema=False)
+
+
+def _karapace_requests_total() -> Callable[[Info], None]:
+    """Deprecated: use http_requests_total instead. Subject to removal."""
+    counter = Counter(
+        "karapace_http_requests_total",
+        "Deprecated: use http_requests_total. Total Request Count for HTTP/TCP Protocol",
+        labelnames=("method", "path", "status"),
+    )
+
+    def instrumentation(info: Info) -> None:
+        path = normalize_path(info.request.url.path)
+        counter.labels(info.request.method, path, info.modified_status).inc()
+
+    return instrumentation
+
+
+def _karapace_requests_duration() -> Callable[[Info], None]:
+    """Deprecated: use http_request_duration_seconds instead. Subject to removal."""
+    histogram = Histogram(
+        "karapace_http_requests_duration_seconds",
+        "Deprecated: use http_request_duration_seconds. Request Duration for HTTP/TCP Protocol",
+        labelnames=("method", "path"),
+    )
+
+    def instrumentation(info: Info) -> None:
+        path = normalize_path(info.request.url.path)
+        histogram.labels(info.request.method, path).observe(info.modified_duration)
+
+    return instrumentation
