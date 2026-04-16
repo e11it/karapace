@@ -18,7 +18,7 @@ from http import HTTPStatus
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from aiokafka.errors import UnknownTopicOrPartitionError
+from aiokafka.errors import TopicAuthorizationFailedError, UnknownTopicOrPartitionError
 from confluent_kafka.admin import AclOperation
 
 from karapace.core.config import InvalidConfiguration, validate_config
@@ -252,3 +252,55 @@ async def test_enforce_raises_500_on_unexpected_error() -> None:
 
     assert excinfo.value.status == HTTPStatus.INTERNAL_SERVER_ERROR
     assert excinfo.value.body["error_code"] == RESTErrorCodes.HTTP_INTERNAL_SERVER_ERROR.value
+
+
+# ---------------------------------------------------------------------------
+# UserRestProxy.produce_messages -> invalidate on TopicAuthorizationFailedError
+# ---------------------------------------------------------------------------
+
+
+async def test_produce_messages_invalidates_cache_on_topic_authorization_failed() -> None:
+    """If the broker rejects a record with ``TopicAuthorizationFailedError`` the
+    REST proxy must drop the cached positive WRITE decision so the next
+    publish attempt re-checks the ACL instead of serving stale "allow"
+    responses for up to ``rest_authorization_topic_acl_cache_ttl_s`` seconds.
+    """
+
+    cache = MagicMock(spec=TopicWriteAclCache)
+    proxy = _make_proxy_with_cache(cache)
+    proxy.kafka_timeout = 5  # type: ignore[attr-defined]
+
+    async def _send(topic: str, *, key: bytes, value: bytes, partition: int | None) -> None:
+        raise TopicAuthorizationFailedError()
+
+    producer = MagicMock()
+    producer.send = _send
+    proxy._maybe_create_async_producer = AsyncMock(return_value=producer)  # type: ignore[attr-defined]
+
+    results = await proxy.produce_messages(topic="orders", prepared_records=[(b"k", b"v", None)])
+
+    cache.invalidate.assert_called_once_with("orders")
+    assert len(results) == 1
+    assert results[0]["error_code"] == 1
+
+
+async def test_produce_messages_tolerates_missing_cache_on_topic_authorization_failed() -> None:
+    """When the feature is disabled (``_topic_write_acl_cache is None``) the
+    invalidation branch must still handle ``TopicAuthorizationFailedError``
+    without raising ``AttributeError``.
+    """
+
+    proxy = _make_proxy_with_cache(None)
+    proxy.kafka_timeout = 5  # type: ignore[attr-defined]
+
+    async def _send(topic: str, *, key: bytes, value: bytes, partition: int | None) -> None:
+        raise TopicAuthorizationFailedError()
+
+    producer = MagicMock()
+    producer.send = _send
+    proxy._maybe_create_async_producer = AsyncMock(return_value=producer)  # type: ignore[attr-defined]
+
+    results = await proxy.produce_messages(topic="orders", prepared_records=[(b"k", b"v", None)])
+
+    assert len(results) == 1
+    assert results[0]["error_code"] == 1

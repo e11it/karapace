@@ -144,9 +144,18 @@ class TopicWriteAclCache:
     def invalidate(self, topic: str) -> None:
         """Remove ``topic`` from the cache.
 
-        Intended for tests and for future hooks such as reacting to
-        ``TopicAuthorizationFailedError`` at produce time by forcing the
-        next publish attempt to re-evaluate the ACL.
+        Called from two places:
+
+        * unit/integration tests, to force the next lookup to go through the
+          fetcher;
+        * ``UserRestProxy.produce_messages`` when the Kafka broker itself
+          raises ``TopicAuthorizationFailedError`` for a record. That means
+          our cached "allow" decision is now stale (typically because the
+          principal's ACL was revoked after the pre-check completed). By
+          dropping the entry we make sure the next publish attempt issues a
+          fresh ``describe_topics`` RPC instead of happily returning the
+          stale positive decision until
+          ``rest_authorization_topic_acl_cache_ttl_s`` elapses.
         """
         self._cache.pop(topic, None)
 

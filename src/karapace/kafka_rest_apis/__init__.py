@@ -1347,6 +1347,25 @@ class UserRestProxy:
                 log.warning("Async task cancelled", exc_info=result)
                 # cancel is retriable
                 produce_results.append({"error_code": 1, "error": "Publish message cancelled"})
+            elif isinstance(result, TopicAuthorizationFailedError):
+                # The broker rejected the produce with "not authorized to write",
+                # even though the REST proxy's cached pre-check decision was
+                # "allow" (or the feature is disabled and there was no pre-check
+                # at all). Invalidate the cache entry so the next publish forces
+                # a fresh ``describe_topics`` RPC and sees the current ACL state
+                # -- without this, a user whose ``Write`` permission was revoked
+                # mid-flight would keep receiving stale "allow" decisions from
+                # the REST proxy until ``rest_authorization_topic_acl_cache_ttl_s``
+                # elapses.
+                log.warning(
+                    "Topic %s rejected at produce time with TopicAuthorizationFailedError; "
+                    "invalidating cached WRITE ACL decision",
+                    topic,
+                )
+                if self._topic_write_acl_cache is not None:
+                    self._topic_write_acl_cache.invalidate(topic)
+                resp = {"error_code": 1, "error": str(result)}
+                produce_results.append(resp)
             elif isinstance(result, BrokerResponseError):
                 resp = {"error_code": 1, "error": result.description}
                 if hasattr(result, "retriable") and result.retriable:
