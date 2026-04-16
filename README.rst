@@ -506,6 +506,15 @@ Keys to take special care are the ones needed to configure Kafka and advertised_
    * - ``rest_authorization``
      - ``false``
      - Use REST API's calling authorization credentials to invoke Kafka operations over SASL authentication of ``sasl_bootstrap_uri`` to delegate REST proxy authorization to Kafka.  If false, then use configured common credentials for all Kafka connections of REST proxy operations.
+   * - ``rest_authorization_enforce_topic_write``
+     - ``false``
+     - When ``true``, the REST proxy verifies that the caller has Kafka ``WRITE`` permission on the target topic **before** registering any schema in Schema Registry. Requires ``rest_authorization: true`` (the decision is evaluated under the caller's SASL credentials) and a Kafka broker 2.3+ whose authorizer reports ``authorizedOperations`` (KIP-430; ``AclAuthorizer``/``StandardAuthorizer`` both do). Without this flag a caller with only ``Describe`` on a foreign topic is able to create or update subjects under that topic's name in Schema Registry, because the REST proxy talks to Schema Registry under the static ``registry_user``/``registry_password`` service credentials regardless of the caller. Disabled by default for backwards compatibility.
+   * - ``rest_authorization_topic_acl_cache_ttl_s``
+     - ``60``
+     - Time-to-live, in seconds, for a cached per-user topic ``WRITE`` ACL decision. Only used when ``rest_authorization_enforce_topic_write`` is enabled. A larger value reduces the number of ``describe_topics`` RPCs against the Kafka broker at the cost of accepting stale ACL decisions for up to this many seconds after an operator changes ACLs on the broker.
+   * - ``rest_authorization_topic_acl_cache_max_size``
+     - ``10000``
+     - Maximum number of topics for which a per-user ``WRITE`` ACL decision is retained. Only used when ``rest_authorization_enforce_topic_write`` is enabled. Older entries are evicted once this limit is reached.
    * - ``rest_base_uri``
      - ``None``
      - Publicly available URI of this instance advertised to the clients using stateful operations such as creating consumers.  If not set, then construct URI using ``advertised_protocol``, ``advertised_hostname``, and ``advertised_port``.
