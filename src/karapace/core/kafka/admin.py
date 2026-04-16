@@ -9,6 +9,7 @@ from collections.abc import Container, Iterable
 from concurrent.futures import Future
 from confluent_kafka import IsolationLevel, TopicCollection, TopicPartition
 from confluent_kafka.admin import (
+    AclOperation,
     AdminClient,
     BrokerMetadata,
     ClusterMetadata,
@@ -17,6 +18,7 @@ from confluent_kafka.admin import (
     NewTopic,
     OffsetSpec,
     ResourceType,
+    TopicDescription,
     TopicMetadata,
 )
 from confluent_kafka.error import KafkaException
@@ -219,3 +221,43 @@ class KafkaAdminClient(_KafkaConfigMixin, AdminClient):
             self._tracer.get_name_from_caller_with_class(self, self.describe_topics)
         ):
             return super().describe_topics(topics, **kwargs)
+
+    def describe_topic_authorized_operations(
+        self,
+        topic: str,
+        *,
+        request_timeout: float = 10.0,
+    ) -> frozenset[AclOperation]:
+        """Return the set of ACL operations the currently authenticated Kafka
+        principal is authorized to perform on ``topic``.
+
+        This is the client-side view of the broker's authorizer decisions for
+        the principal that owns this ``AdminClient`` connection: it does not
+        inspect raw ACL rules (which would require ``Describe`` on
+        ``Cluster``), it asks the broker to evaluate them.
+
+        Requires Kafka broker 2.3+ (KIP-430) and an authorizer that reports
+        ``authorizedOperations`` (the standard ``AclAuthorizer`` and
+        ``StandardAuthorizer`` do). If the broker does not report any
+        operations, an empty frozenset is returned, and the caller is
+        expected to treat that as "unknown, deny".
+
+        :param topic: Topic name to describe.
+        :param request_timeout: Per-request timeout, in seconds.
+        :raises UnknownTopicOrPartitionError: If the topic does not exist.
+        :raises KafkaException: On any other broker-side failure.
+        :returns: A frozenset of ``AclOperation`` values allowed for the
+            current principal on ``topic``. May be empty when the broker or
+            authorizer does not report authorized operations.
+        """
+        futmap = self.describe_topics(
+            TopicCollection([topic]),
+            include_authorized_operations=True,
+            request_timeout=request_timeout,
+        )
+        try:
+            desc: TopicDescription = futmap[topic].result(timeout=request_timeout)
+        except KafkaException as exc:
+            raise_from_kafkaexception(exc)
+        ops = getattr(desc, "authorized_operations", None) or ()
+        return frozenset(ops)

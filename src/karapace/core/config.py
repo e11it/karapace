@@ -114,7 +114,15 @@ class Config(BaseSettings):
     registry_password: str | None = None
     registry_ca: str | None = None
     registry_authfile: str | None = None
+    # When False (default), the REST proxy bypasses Kafka ACLs.
     rest_authorization: bool = False
+    # When True, the REST proxy verifies the caller's Kafka WRITE ACL on the target topic
+    # before registering any schema in Schema Registry. Requires rest_authorization to be True.
+    rest_authorization_enforce_topic_write: bool = False
+    # TTL (in seconds) for the per-user topic WRITE ACL decision cache.
+    rest_authorization_topic_acl_cache_ttl_s: int = 60
+    # Maximum number of topics cached per user for WRITE ACL decisions.
+    rest_authorization_topic_acl_cache_max_size: int = 10000
     rest_base_uri: str | None = None
     rest_lookup_schema_before_register: bool = False
     rest_avro_extended_json_parser: bool = False
@@ -348,6 +356,15 @@ def validate_config(config: Config) -> None:
         raise InvalidConfiguration(
             "Using 'rest_authorization' requires configuration value for 'sasl_bootstrap_uri' to be set"
         )
+
+    if config.rest_authorization_enforce_topic_write and not config.rest_authorization:
+        raise InvalidConfiguration("'rest_authorization_enforce_topic_write' requires 'rest_authorization' to be enabled")
+
+    if config.rest_authorization_topic_acl_cache_ttl_s <= 0:
+        raise InvalidConfiguration("'rest_authorization_topic_acl_cache_ttl_s' must be a positive integer")
+
+    if config.rest_authorization_topic_acl_cache_max_size <= 0:
+        raise InvalidConfiguration("'rest_authorization_topic_acl_cache_max_size' must be a positive integer")
 
 
 def write_config(config_path: Path, custom_values: Config) -> None:
