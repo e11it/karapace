@@ -12,6 +12,7 @@ from karapace.core.logging_setup import configure_logging, log_config_without_se
 from karapace.kafka_rest_apis import KafkaRest
 
 import argparse
+import karapace.core.instrumentation.tracer
 import logging
 import sys
 
@@ -19,7 +20,12 @@ import sys
 @inject
 def main() -> int:
     container = KarapaceContainer()
-    container.wire(modules=[__name__])
+    # NOTE: ``karapace.core.instrumentation.tracer`` must be wired here too,
+    # otherwise ``Tracer.get_tracer``'s ``Provide[...]`` default is never
+    # resolved and any tracer-wrapped admin call (e.g. ``describe_topics``)
+    # fails with ``AttributeError: 'Provide' object has no attribute 'tags'``.
+    # This matches the wiring already done in ``src/karapace/__main__.py``.
+    container.wire(modules=[__name__, karapace.core.instrumentation.tracer])
 
     parser = argparse.ArgumentParser(prog="karapace", description="Karapace: Your Kafka essentials in one tool")
     parser.add_argument("--version", action="version", help="show program version", version=karapace_version.__version__)
