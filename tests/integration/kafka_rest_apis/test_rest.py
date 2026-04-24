@@ -474,11 +474,12 @@ async def test_publish_with_incompatible_schema(rest_async_client: Client, admin
         json={"value_schema": json.dumps(schema_2), "records": [{"value": {"temperature": 25}}]},
         headers=REST_HEADERS["avro"],
     )
-    assert res.status_code == 408
+    assert res.status_code == 409
     res_json = res.json()
-    assert res_json["error_code"] == 40801
+    assert res_json["error_code"] == 40901
     assert "message" in res_json
-    assert "Error when registering schema" in res_json["message"]
+    assert res_json["message"].startswith("Schema being registered is incompatible with an earlier schema for subject")
+    assert f'"{topic_name}-value"' in res_json["message"]
 
 
 async def test_publish_with_schema_id_of_another_subject(

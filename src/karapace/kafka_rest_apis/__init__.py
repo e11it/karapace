@@ -899,6 +899,30 @@ class UserRestProxy:
                 return False
         return isinstance(schema, str)
 
+    @staticmethod
+    def _schema_retrieval_error_payload(schema_error: SchemaRetrievalError) -> dict[str, object] | None:
+        if not schema_error.args:
+            return None
+        first_arg = schema_error.args[0]
+        if isinstance(first_arg, dict):
+            return first_arg
+        return None
+
+    @staticmethod
+    def _is_incompatible_schema_error(schema_error: SchemaRetrievalError) -> bool:
+        payload = UserRestProxy._schema_retrieval_error_payload(schema_error)
+        if payload is None:
+            return False
+        error_code = payload.get("error_code")
+        if error_code in {HTTPStatus.CONFLICT.value, RESTErrorCodes.INCOMPATIBLE_SCHEMA.value}:
+            return True
+        message = payload.get("message")
+        if isinstance(message, str):
+            message_lower = message.lower()
+            if "incompatible with an earlier schema" in message_lower:
+                return True
+        return False
+
     async def get_schema_id(
         self,
         data: dict,
@@ -1011,7 +1035,19 @@ class UserRestProxy:
                 content_type=content_type,
                 status=HTTPStatus.BAD_REQUEST,
             )
-        except SchemaRetrievalError:
+        except SchemaRetrievalError as schema_error:
+            if self._is_incompatible_schema_error(schema_error):
+                subject = f"{topic}-{subject_type}"
+                KafkaRest.r(
+                    body={
+                        "error_code": RESTErrorCodes.INCOMPATIBLE_SCHEMA.value,
+                        "message": (
+                            f'Schema being registered is incompatible with an earlier schema for subject "{subject}"'
+                        ),
+                    },
+                    content_type=content_type,
+                    status=HTTPStatus.CONFLICT,
+                )
             KafkaRest.r(
                 body={
                     "error_code": RESTErrorCodes.SCHEMA_RETRIEVAL_ERROR.value,
