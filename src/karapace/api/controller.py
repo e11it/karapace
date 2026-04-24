@@ -46,6 +46,7 @@ from karapace.core.errors import (
     SubjectSoftDeletedException,
     VersionNotFoundException,
 )
+from karapace.core.external_schema_normalizer import ExternalAvroSchemaNormalizer, ExternalSchemaNormalizerError
 from karapace.core.protobuf.exception import ProtobufUnresolvedDependencyException
 from karapace.core.schema_models import (
     ParsedTypedSchema,
@@ -70,11 +71,18 @@ LOG = logging.getLogger(__name__)
 
 
 class KarapaceSchemaRegistryController:
-    def __init__(self, config: Config, schema_registry: KarapaceSchemaRegistry, stats: StatsClient) -> None:
+    def __init__(
+        self,
+        config: Config,
+        schema_registry: KarapaceSchemaRegistry,
+        stats: StatsClient,
+        external_avro_schema_normalizer: ExternalAvroSchemaNormalizer,
+    ) -> None:
         self.config = config
         self._process_start_time = time.monotonic()
         self.stats = stats
         self.schema_registry = schema_registry
+        self.external_avro_schema_normalizer = external_avro_schema_normalizer
 
     def _add_schema_registry_routes(self) -> None:
         pass
@@ -121,6 +129,7 @@ class KarapaceSchemaRegistryController:
         version: str,
     ) -> CompatibilityCheckResponse:
         """Check for schema compatibility"""
+        schema_request = await self._normalize_schema_request_if_needed(subject=subject, schema_request=schema_request)
         try:
             compatibility_mode = self.schema_registry.get_compatibility_mode(subject=subject)
         except ValueError as exc:
@@ -695,6 +704,7 @@ class KarapaceSchemaRegistryController:
         deleted: bool,
         normalize: bool,
     ) -> SchemaResponse:
+        schema_request = await self._normalize_schema_request_if_needed(subject=subject, schema_request=schema_request)
         try:
             subject_data = self._subject_get(subject, include_deleted=deleted)
         except (SchemasNotFoundException, SubjectNotFoundException) as exc:
@@ -801,6 +811,9 @@ class KarapaceSchemaRegistryController:
         request: Request,
     ) -> SchemaIdResponse:
         LOG.debug("POST with subject: %r, request: %r", subject, schema_request)
+        schema_request = await self._normalize_schema_request_if_needed(
+            subject=Subject(subject), schema_request=schema_request
+        )
 
         references = self._validate_references(schema_request=schema_request)
 
@@ -925,6 +938,28 @@ class KarapaceSchemaRegistryController:
                     "message": f"New {schema_request.schema_type} schema has invalid references",
                 },
             ) from exc
+
+    async def _normalize_schema_request_if_needed(
+        self,
+        *,
+        subject: Subject,
+        schema_request: SchemaRequest,
+    ) -> SchemaRequest:
+        """Normalize AVRO schema through external service when feature is enabled."""
+        if not self.external_avro_schema_normalizer.enabled:
+            return schema_request
+        if schema_request.schema_type is not SchemaType.AVRO:
+            return schema_request
+
+        try:
+            normalized_schema = await self.external_avro_schema_normalizer.normalize_schema(
+                subject=str(subject),
+                schema_str=schema_request.schema_str,
+            )
+        except ExternalSchemaNormalizerError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+        return schema_request.model_copy(update={"schema_str": normalized_schema})
 
     def get_old_schema(self, subject: Subject, version: Version) -> ParsedTypedSchema:
         old: JsonObject | None = None

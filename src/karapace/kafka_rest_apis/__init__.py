@@ -899,6 +899,29 @@ class UserRestProxy:
                 return False
         return isinstance(schema, str)
 
+    @staticmethod
+    def _schema_retrieval_error_payload(schema_error: SchemaRetrievalError) -> dict[str, object] | None:
+        if not schema_error.args:
+            return None
+        first_arg = schema_error.args[0]
+        if isinstance(first_arg, dict):
+            return first_arg
+        return None
+
+    @staticmethod
+    def _is_invalid_schema_retrieval_error(schema_error: SchemaRetrievalError) -> bool:
+        payload = UserRestProxy._schema_retrieval_error_payload(schema_error)
+        if payload is None:
+            return False
+        error_code = payload.get("error_code")
+        try:
+            return int(error_code) == RESTErrorCodes.INVALID_SCHEMA.value
+        except (TypeError, ValueError):
+            return False
+
+    def _should_map_retrieval_error_to_invalid_schema(self, *, schema_type: SchemaType) -> bool:
+        return self.config.external_avro_normalizer_global_enabled and schema_type is SchemaType.AVRO
+
     async def get_schema_id(
         self,
         data: dict,
@@ -1011,7 +1034,28 @@ class UserRestProxy:
                 content_type=content_type,
                 status=HTTPStatus.BAD_REQUEST,
             )
-        except SchemaRetrievalError:
+        except SchemaRetrievalError as schema_error:
+            if self._should_map_retrieval_error_to_invalid_schema(
+                schema_type=schema_type
+            ) and self._is_invalid_schema_retrieval_error(schema_error):
+                payload = self._schema_retrieval_error_payload(schema_error) or {}
+                upstream_message = payload.get("message")
+                if isinstance(upstream_message, str) and upstream_message:
+                    message = (
+                        f"Invalid schema. format = {schema_type.value}, "
+                        f"subject = {topic}-{subject_type}. Error: {upstream_message}"
+                    )
+                else:
+                    message = f"Invalid schema. format = {schema_type.value}, " f"subject = {topic}-{subject_type}"
+                KafkaRest.r(
+                    body={
+                        "error_code": RESTErrorCodes.INVALID_SCHEMA.value,
+                        "message": message,
+                    },
+                    content_type=content_type,
+                    status=HTTPStatus.UNPROCESSABLE_ENTITY,
+                )
+                return
             KafkaRest.r(
                 body={
                     "error_code": RESTErrorCodes.SCHEMA_RETRIEVAL_ERROR.value,
