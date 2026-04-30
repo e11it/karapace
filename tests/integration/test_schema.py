@@ -2087,6 +2087,29 @@ async def test_http_headers(registry_async_client: Client) -> None:
     assert res.json()["message"] == "HTTP 415 Unsupported Media Type"
     assert res.headers["Content-Type"] == "application/vnd.schemaregistry.v1+json"
 
+    # POST with a body but no Content-Type should fail content negotiation before body validation.
+    client = await registry_async_client.get_client()
+    schema_payload = json.dumps(
+        {
+            "schema": json.dumps(
+                {
+                    "type": "record",
+                    "name": "test",
+                    "fields": [{"type": "string", "name": "field1"}],
+                }
+            )
+        }
+    ).encode()
+    async with client.post(
+        registry_async_client.path_for("subjects/test_no_content_type/versions"),
+        data=schema_payload,
+        skip_auto_headers={"Content-Type"},
+        ssl=registry_async_client.ssl_mode,
+    ) as missing_content_type_res:
+        assert missing_content_type_res.status == 415
+        assert await missing_content_type_res.json() == {"message": "HTTP 415 Unsupported Media Type"}
+        assert missing_content_type_res.headers["Content-Type"] == "application/vnd.schemaregistry.v1+json"
+
     # Multiple Accept values
     res = await registry_async_client.get(
         "subjects", headers={"Accept": "text/html, image/gif, image/jpeg, *; q=.2, */*; q=.2"}

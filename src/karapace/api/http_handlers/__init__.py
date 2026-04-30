@@ -4,12 +4,17 @@ See LICENSE for details
 """
 
 from fastapi import FastAPI, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from http import HTTPStatus
 from karapace.api.routers.errors import KarapaceValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import Request as StarletteHTTPRequest
+
+
+def _json_safe_validation_errors(errors: object) -> object:
+    return jsonable_encoder(errors, custom_encoder={bytes: lambda value: value.decode("utf-8", errors="replace")})
 
 
 def setup_exception_handlers(app: FastAPI) -> None:
@@ -24,7 +29,7 @@ def setup_exception_handlers(app: FastAPI) -> None:
             error_code = exc.error_code
             message = exc.body
         else:
-            message = exc.errors()
+            message = _json_safe_validation_errors(exc.errors())
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             content={
