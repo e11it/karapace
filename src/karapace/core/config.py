@@ -170,6 +170,9 @@ class Config(BaseSettings):
     kafka_retriable_errors_silenced: bool = True
     use_protobuf_formatter: bool = False
     waiting_time_before_acting_as_master_ms: int = 5000
+    external_avro_normalizer_global_enabled: bool = False
+    external_avro_normalizer_url: str | None = None
+    external_avro_normalizer_timeout_ms: int = 3000
 
     sentry: Mapping[str, object] | None = None
     tags: KarapaceTags = KarapaceTags()

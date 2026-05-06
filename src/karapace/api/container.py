@@ -27,4 +27,5 @@ class SchemaRegistryContainer(containers.DeclarativeContainer):
         config=karapace_container.config,
         schema_registry=schema_registry,
         stats=metrics_container.stats,
+        external_avro_schema_normalizer=karapace_container.external_avro_schema_normalizer,
     )
