@@ -506,9 +506,32 @@ Keys to take special care are the ones needed to configure Kafka and advertised_
    * - ``rest_authorization``
      - ``false``
      - Use REST API's calling authorization credentials to invoke Kafka operations over SASL authentication of ``sasl_bootstrap_uri`` to delegate REST proxy authorization to Kafka.  If false, then use configured common credentials for all Kafka connections of REST proxy operations.
+   * - ``rest_avro_permissive_json_parser``
+     - ``true``
+     - Controls Avro JSON union parsing in REST proxy. When enabled (default), legacy permissive handling is used for backwards compatibility. When disabled, strict Avro JSON union tagging is enforced to avoid ambiguous branch selection.
+   * - ``rest_avro_extended_json_parser``
+     - ``false``
+     - Enables extended logical-type parsing for Avro REST payloads (for example ISO-8601 strings). For union logical types, provide an explicit type wrapper (for example ``{"date": "2025-05-05"}``) instead of untagged values.
    * - ``rest_base_uri``
      - ``None``
      - Publicly available URI of this instance advertised to the clients using stateful operations such as creating consumers.  If not set, then construct URI using ``advertised_protocol``, ``advertised_hostname``, and ``advertised_port``.
+
+REST proxy Avro union logical-type payload examples
+---------------------------------------------------
+
+Accepted with ``rest_avro_extended_json_parser=true`` (explicit logical type wrapper)::
+
+  $ curl -H "Content-Type: application/vnd.kafka.avro.v2+json" -X POST -d \
+    '{"value_schema":"{\"type\":\"record\",\"name\":\"LogicalUnion\",\"fields\":[{\"name\":\"example1\",\"type\":[\"null\",{\"type\":\"int\",\"logicalType\":\"date\"},{\"type\":\"long\",\"logicalType\":\"timestamp-micros\"}]}]}", \
+    "records":[{"value":{"example1":{"date":"2025-05-05"}}}]}' \
+    http://localhost:8082/topics/my_topic
+
+Rejected in strict mode (ambiguous untagged union logical value)::
+
+  $ curl -H "Content-Type: application/vnd.kafka.avro.v2+json" -X POST -d \
+    '{"value_schema":"{\"type\":\"record\",\"name\":\"LogicalUnion\",\"fields\":[{\"name\":\"example1\",\"type\":[\"null\",{\"type\":\"int\",\"logicalType\":\"date\"},{\"type\":\"long\",\"logicalType\":\"timestamp-micros\"}]}]}", \
+    "records":[{"value":{"example1":"2025-05-05"}}]}' \
+    http://localhost:8082/topics/my_topic
    * - ``metadata_max_age_ms``
      - ``60000``
      - Period of time in milliseconds after Kafka metadata is force refreshed.
