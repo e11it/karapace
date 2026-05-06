@@ -518,11 +518,6 @@ def _unfold_avro_json(
                 return value
             raise InvalidPayload(f"{path}: null is not allowed (union does not contain null branch)")
 
-        if not isinstance(value, dict) or len(value) != 1:
-            raise InvalidPayload(f'{path}: expected Avro union wrapper object with single key like {{"<tag>": ...}}')
-
-        ((tag, wrapped_value),) = value.items()
-
         def get_names(obj: avro.schema.Schema) -> set[str]:
             names: set[str] = set()
             if isinstance(obj, avro.schema.PrimitiveSchema):
@@ -541,6 +536,15 @@ def _unfold_avro_json(
             # Use fullname for named types; if there is no namespace this equals short name.
             names.add(obj.fullname)
             return names
+
+        if not isinstance(value, dict) or len(value) != 1:
+            allowed_tags = sorted({name for branch in schema.schemas for name in get_names(branch)})
+            raise InvalidPayload(
+                f'{path}: expected Avro union wrapper object with single key like {{"<tag>": ...}};'
+                f" valid tags: {allowed_tags!r}"
+            )
+
+        ((tag, wrapped_value),) = value.items()
 
         matching_branches = [branch for branch in schema.schemas if tag in get_names(branch)]
         if len(matching_branches) != 1:
