@@ -41,6 +41,7 @@ from karapace.kafka_rest_apis.authentication import (
     get_expiration_time_from_header,
     get_kafka_client_auth_parameters_from_config,
 )
+from karapace.kafka_rest_apis.authorization_cache import TopicWriteAclCache
 from karapace.kafka_rest_apis.consumer_manager import ConsumerManager
 from karapace.kafka_rest_apis.convert_to_int import convert_to_int
 from karapace.kafka_rest_apis.error_codes import RESTErrorCodes
@@ -502,6 +503,18 @@ class UserRestProxy:
         self._async_producer: AsyncKafkaProducer | None = None
         self.naming_strategy = NameStrategy(self.config.name_strategy)
 
+        # Per-user topic WRITE ACL cache. Only created when the operator has
+        # opted into the strict pre-check and credential forwarding is on;
+        # otherwise it stays ``None`` and ``_enforce_topic_write_acl`` is a
+        # no-op, preserving the legacy behaviour.
+        self._topic_write_acl_cache: TopicWriteAclCache | None = None
+        if self.config.rest_authorization and self.config.rest_authorization_enforce_topic_write:
+            self._topic_write_acl_cache = TopicWriteAclCache(
+                fetcher=self._fetch_topic_write_allowed,
+                ttl_s=self.config.rest_authorization_topic_acl_cache_ttl_s,
+                maxsize=self.config.rest_authorization_topic_acl_cache_max_size,
+            )
+
     def __str__(self) -> str:
         return f"UserRestProxy(username={self.config.sasl_plain_username})"
 
@@ -800,6 +813,90 @@ class UserRestProxy:
             self.admin_client = None
             self.consumer_manager = None
 
+    async def _fetch_topic_write_allowed(self, topic: str) -> bool:
+        """Resolve the ``WRITE`` ACL decision for ``topic`` for this proxy's
+        principal.
+
+        Runs the blocking
+        :meth:`KafkaAdminClient.describe_topic_authorized_operations` call
+        in the default executor to keep the event loop responsive. The
+        result is translated to a boolean through
+        :meth:`TopicWriteAclCache.decision_from_operations`.
+
+        This method is only invoked by
+        :class:`TopicWriteAclCache` on cache miss; callers must go through
+        the cache in order to benefit from coalescing and TTL.
+
+        :param topic: Topic name to check.
+        :returns: ``True`` iff the broker reports ``AclOperation.WRITE``
+            among the authorized operations for the current principal.
+        :raises UnknownTopicOrPartitionError: If the topic does not exist.
+        :raises KafkaException: On any other broker-side failure.
+        """
+        assert self.admin_client is not None, "admin_client must be initialised before ACL checks"
+        loop = asyncio.get_running_loop()
+        operations = await loop.run_in_executor(
+            None,
+            self.admin_client.describe_topic_authorized_operations,
+            topic,
+        )
+        return TopicWriteAclCache.decision_from_operations(operations)
+
+    async def _enforce_topic_write_acl(self, topic: str, content_type: str) -> None:
+        """Reject the current request with HTTP 403 if the caller is not
+        authorized to produce to ``topic``.
+
+        This is a no-op unless both ``rest_authorization`` and
+        ``rest_authorization_enforce_topic_write`` are enabled in the
+        config; in that case the check runs under the per-user admin
+        client configured in :meth:`init_admin_client`, which in turn uses
+        the SASL credentials extracted from the incoming ``Authorization``
+        header (see :meth:`KafkaRest.get_user_proxy`).
+
+        The decision is cached for
+        ``config.rest_authorization_topic_acl_cache_ttl_s`` seconds per
+        topic, so the common case is a single in-process dict lookup with
+        no network traffic.
+
+        On broker/authorizer failures we fail closed with HTTP 500 rather
+        than silently allowing the request through.
+
+        :param topic: Topic the caller attempts to publish to.
+        :param content_type: Negotiated content type, used for the error body.
+        :raises HTTPResponse: 403 when the principal lacks ``WRITE``; 404
+            when the topic does not exist (mirroring
+            :meth:`get_topic_info`); 500 on unexpected authorizer errors.
+        """
+        if self._topic_write_acl_cache is None:
+            return
+        try:
+            allowed = await self._topic_write_acl_cache.is_write_allowed(topic)
+        except UnknownTopicOrPartitionError:
+            KafkaRest.not_found(
+                message=f"Topic {topic} not found",
+                content_type=content_type,
+                sub_code=RESTErrorCodes.TOPIC_NOT_FOUND.value,
+            )
+        except Exception:
+            log.exception("Failed to evaluate topic write ACL for %s", topic)
+            KafkaRest.r(
+                body={
+                    "error_code": RESTErrorCodes.HTTP_INTERNAL_SERVER_ERROR.value,
+                    "message": "Failed to evaluate topic authorization",
+                },
+                content_type=content_type,
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+        if not allowed:
+            KafkaRest.r(
+                body={
+                    "error_code": RESTErrorCodes.TOPIC_AUTHORIZATION_FAILED.value,
+                    "message": f"Not authorized to produce to topic {topic}",
+                },
+                content_type=content_type,
+                status=HTTPStatus.FORBIDDEN,
+            )
+
     async def publish(self, topic: str, partition_id: str | None, content_type: str, request: HTTPRequest) -> None:
         """
         :raises NoBrokersAvailable:
@@ -811,6 +908,12 @@ class UserRestProxy:
         if partition_id is not None:
             _ = await self.get_partition_info(topic, partition_id, content_type)
             partition_id = int(partition_id)
+        # Verify the caller has WRITE on the topic BEFORE touching Schema
+        # Registry inside ``validate_publish_request_format``. Without this
+        # gate, a user with only Describe permission on a foreign topic
+        # would be able to create/update subjects under its name in Schema
+        # Registry, because REST talks to SR under static service creds.
+        await self._enforce_topic_write_acl(topic, content_type)
         for k in ["key_schema_id", "value_schema_id"]:
             convert_to_int(data, k, content_type)
         await self.validate_publish_request_format(data, formats, content_type, topic)
@@ -1297,6 +1400,25 @@ class UserRestProxy:
                 log.warning("Async task cancelled", exc_info=result)
                 # cancel is retriable
                 produce_results.append({"error_code": 1, "error": "Publish message cancelled"})
+            elif isinstance(result, TopicAuthorizationFailedError):
+                # The broker rejected the produce with "not authorized to write",
+                # even though the REST proxy's cached pre-check decision was
+                # "allow" (or the feature is disabled and there was no pre-check
+                # at all). Invalidate the cache entry so the next publish forces
+                # a fresh ``describe_topics`` RPC and sees the current ACL state
+                # -- without this, a user whose ``Write`` permission was revoked
+                # mid-flight would keep receiving stale "allow" decisions from
+                # the REST proxy until ``rest_authorization_topic_acl_cache_ttl_s``
+                # elapses.
+                log.warning(
+                    "Topic %s rejected at produce time with TopicAuthorizationFailedError; "
+                    "invalidating cached WRITE ACL decision",
+                    topic,
+                )
+                if self._topic_write_acl_cache is not None:
+                    self._topic_write_acl_cache.invalidate(topic)
+                resp = {"error_code": 1, "error": str(result)}
+                produce_results.append(resp)
             elif isinstance(result, BrokerResponseError):
                 resp = {"error_code": 1, "error": result.description}
                 if hasattr(result, "retriable") and result.retriable:
