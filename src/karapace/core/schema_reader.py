@@ -97,6 +97,7 @@ def _create_consumer_from_config(config: Config) -> KafkaConsumer:
     session_timeout_ms = config.session_timeout_ms
     kwargs: dict = dict(
         bootstrap_servers=config.bootstrap_uri,
+        consumer_group_id_prefix=config.consumer_group_id_prefix,
         enable_auto_commit=False,
         client_id=config.client_id,
         fetch_max_wait_ms=50,

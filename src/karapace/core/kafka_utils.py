@@ -44,6 +44,7 @@ def kafka_admin_from_config(config: Config) -> KafkaAdminClient:
 def kafka_consumer_from_config(config: Config, topic: str) -> Iterator[KafkaConsumer]:
     kwargs: dict = dict(
         bootstrap_servers=config.bootstrap_uri,
+        consumer_group_id_prefix=config.consumer_group_id_prefix,
         topic=topic,
         enable_auto_commit=False,
         client_id=config.client_id,
