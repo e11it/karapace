@@ -55,9 +55,15 @@ def test_get_ignores_content_type_check() -> None:
     assert negotiate_schema_content_type(req) == SCHEMA_RESPONSE_DEFAULT_CONTENT_TYPE
 
 
-def test_missing_content_type_defaults_to_json() -> None:
-    req = _request("POST")
-    assert negotiate_schema_content_type(req) == SCHEMA_RESPONSE_DEFAULT_CONTENT_TYPE
+@pytest.mark.parametrize("method", ["POST", "PUT"])
+def test_missing_content_type_returns_415(method: str) -> None:
+    req = _request(method)
+
+    with pytest.raises(HTTPException) as exc_info:
+        negotiate_schema_content_type(req)
+
+    assert exc_info.value.status_code == status.HTTP_415_UNSUPPORTED_MEDIA_TYPE
+    assert exc_info.value.detail == {"message": "HTTP 415 Unsupported Media Type"}
 
 
 def test_content_type_with_parameters_is_accepted() -> None:
