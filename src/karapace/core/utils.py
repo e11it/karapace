@@ -12,13 +12,13 @@ from aiohttp.web_log import AccessLogger
 from aiohttp.web_request import BaseRequest
 from aiohttp.web_response import StreamResponse
 from dataclasses import dataclass
-import datetime as _dt_module
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from types import MappingProxyType
 from typing import AnyStr, cast, IO, Literal, NoReturn, overload, TypeVar
 
+import datetime as _dt_module
 import importlib.util
 import logging
 import signal
@@ -41,9 +41,14 @@ if importlib.util.find_spec("orjson"):
             return orjson.loads(s)
 
         @staticmethod
-        def dumps(obj, *, default=None, indent=None, sort_keys=False, separators=None, **kwargs):
-            """Dump object to JSON string (returns str for compatibility)."""
-            options = orjson.OPT_PASSTHROUGH_DATETIME
+        def dumps(obj, *, default=None, indent=None, sort_keys=False, separators=None, passthrough_datetime=False, **kwargs):
+            """Dump object to JSON string (returns str for compatibility).
+
+            When ``passthrough_datetime`` is True, datetime/date/time objects are routed
+            through ``default`` (e.g. for "Z"-suffixed timestamps of consumed Avro
+            logical types) instead of orjson's native RFC 3339 serialization.
+            """
+            options = orjson.OPT_PASSTHROUGH_DATETIME if passthrough_datetime else 0
             if sort_keys:
                 options |= orjson.OPT_SORT_KEYS
             if indent is not None:
@@ -62,9 +67,11 @@ if importlib.util.find_spec("orjson"):
             return orjson.loads(content)
 
         @staticmethod
-        def dump(obj, fp, *, default=None, indent=None, sort_keys=False, separators=None, **kwargs):
+        def dump(
+            obj, fp, *, default=None, indent=None, sort_keys=False, separators=None, passthrough_datetime=False, **kwargs
+        ):
             """Dump object to JSON file."""
-            options = orjson.OPT_PASSTHROUGH_DATETIME
+            options = orjson.OPT_PASSTHROUGH_DATETIME if passthrough_datetime else 0
             if sort_keys:
                 options |= orjson.OPT_SORT_KEYS
             if indent is not None:
@@ -73,6 +80,7 @@ if importlib.util.find_spec("orjson"):
             fp.write(result)
 
     json = _JsonModule()
+    _JSON_BACKEND_SUPPORTS_PASSTHROUGH_DATETIME = True
 
 elif importlib.util.find_spec("ujson"):
     from ujson import JSONDecodeError  # noqa: F401
@@ -80,13 +88,14 @@ elif importlib.util.find_spec("ujson"):
     import ujson as _ujson
 
     class _JsonModule:  # type: ignore[no-redef]
-        """Wrapper around ujson that routes datetime/date/time through default_json_serialization.
+        """Wrapper around ujson that can route datetime/date/time through ``_isoformat``.
 
         ujson serialises datetime objects natively as "+00:00" offset strings, bypassing
-        the ``default`` callback (which is only invoked for *unknown* types).  To keep
-        the output format consistent with the stdlib-json backend (which calls
-        ``_isoformat`` and produces "Z"), we recursively replace datetime/date/time
-        objects before handing the value to ujson.
+        the ``default`` callback (which is only invoked for *unknown* types).  When
+        ``passthrough_datetime`` is requested, we keep the output format consistent with
+        the stdlib-json backend (which calls ``_isoformat`` and produces "Z") by
+        recursively replacing datetime/date/time objects before handing the value to
+        ujson.  Without the flag ujson's native behaviour is preserved.
         """
 
         @staticmethod
@@ -107,22 +116,33 @@ elif importlib.util.find_spec("ujson"):
             return _ujson.loads(s)
 
         @staticmethod
-        def dumps(obj, *, default=None, indent=None, sort_keys=False, separators=None, **kwargs):
-            return _ujson.dumps(_JsonModule._preprocess(obj), default=default, indent=indent or 0, sort_keys=sort_keys)
+        def dumps(obj, *, default=None, indent=None, sort_keys=False, separators=None, passthrough_datetime=False, **kwargs):
+            if passthrough_datetime:
+                obj = _JsonModule._preprocess(obj)
+            return _ujson.dumps(obj, default=default, indent=indent or 0, sort_keys=sort_keys)
 
         @staticmethod
         def load(fp):
             return _ujson.load(fp)
 
         @staticmethod
-        def dump(obj, fp, *, default=None, indent=None, sort_keys=False, separators=None, **kwargs):
-            return _ujson.dump(_JsonModule._preprocess(obj), fp, default=default, indent=indent or 0, sort_keys=sort_keys)
+        def dump(
+            obj, fp, *, default=None, indent=None, sort_keys=False, separators=None, passthrough_datetime=False, **kwargs
+        ):
+            if passthrough_datetime:
+                obj = _JsonModule._preprocess(obj)
+            return _ujson.dump(obj, fp, default=default, indent=indent or 0, sort_keys=sort_keys)
 
     json = _JsonModule()
+    _JSON_BACKEND_SUPPORTS_PASSTHROUGH_DATETIME = True
 else:
     from json import JSONDecodeError  # noqa: F401
 
     import json
+
+    # The stdlib backend has no native datetime support: such values always go through
+    # the ``default`` callback, which is equivalent to passthrough being enabled.
+    _JSON_BACKEND_SUPPORTS_PASSTHROUGH_DATETIME = False
 
 NS_BLACKOUT_DURATION_SECONDS = 120
 LOG = logging.getLogger(__name__)
@@ -189,6 +209,7 @@ def json_encode(
     sort_keys: bool | None = ...,
     compact: bool | None = ...,
     indent: int | None = ...,
+    passthrough_datetime: bool = ...,
 ) -> str: ...
 
 
@@ -200,6 +221,7 @@ def json_encode(
     sort_keys: bool | None = ...,
     compact: bool | None = ...,
     indent: int | None = ...,
+    passthrough_datetime: bool = ...,
 ) -> bytes: ...
 
 
@@ -210,7 +232,16 @@ def json_encode(
     sort_keys: bool | None = None,
     compact: bool | None = None,
     indent: int | None = None,
+    passthrough_datetime: bool = False,
 ) -> AnyStr:
+    """Encode ``obj`` as JSON.
+
+    ``passthrough_datetime`` opts in to routing datetime/date/time objects through
+    ``default_json_serialization`` (producing "Z"-suffixed UTC timestamps). It should
+    only be enabled where such objects are expected in the payload, e.g. consumed
+    Avro records with logical types. By default the backend-native datetime
+    serialization is used.
+    """
     kwargs = {}
     if indent is not None:
         kwargs["indent"] = indent
@@ -218,6 +249,8 @@ def json_encode(
         kwargs["separators"] = (",", ":")
     if sort_keys is True:
         kwargs["sort_keys"] = True
+    if passthrough_datetime and _JSON_BACKEND_SUPPORTS_PASSTHROUGH_DATETIME:
+        kwargs["passthrough_datetime"] = True
     result = json.dumps(obj, default=default_json_serialization, **kwargs)
     return result.encode("utf8") if binary is True else result
 
