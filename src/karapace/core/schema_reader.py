@@ -55,6 +55,7 @@ from typing import Final, cast
 import asyncio
 import json
 import logging
+import secrets
 import time
 
 LOG = logging.getLogger(__name__)
@@ -91,13 +92,13 @@ class MessageType(Enum):
 
 
 def _create_consumer_from_config(config: Config) -> KafkaConsumer:
-    # Group not set on purpose, all consumers read the same data
+    # A unique group id is generated on purpose, all consumers read the same data
     # NOTE: Don't pass topic= here to avoid subscribing before the topic exists
     # (causes issues with confluent-kafka 2.13+). Subscribe after topic creation instead.
     session_timeout_ms = config.session_timeout_ms
     kwargs: dict = dict(
         bootstrap_servers=config.bootstrap_uri,
-        consumer_group_id_prefix=config.consumer_group_id_prefix,
+        group_id=f"{config.consumer_group_id_prefix}{secrets.token_hex(6)}",
         enable_auto_commit=False,
         client_id=config.client_id,
         fetch_max_wait_ms=50,
