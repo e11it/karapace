@@ -99,6 +99,26 @@ def _decimal_fits_precision(value: decimal.Decimal, precision: int, scale: int) 
     return digits <= precision
 
 
+def _decimal_from_number(value: int | str, precision: int, scale: int) -> decimal.Decimal:
+    """Convert a JSON int or numeric string to a Decimal honouring schema scale/precision.
+
+    More fractional digits than the schema scale is an error: silently rounding
+    would corrupt data the client believes was stored exactly.
+    """
+    try:
+        parsed = decimal.Decimal(str(value))
+    except decimal.InvalidOperation as e:
+        raise InvalidPayload(f"{value!r} is not a valid decimal value") from e
+    with decimal.localcontext() as ctx:
+        ctx.prec = max(ctx.prec, len(parsed.as_tuple().digits) + scale + 4)
+        converted = parsed.quantize(_DECIMAL_TEN**-scale)
+        if converted != parsed:
+            raise InvalidPayload(f"{value!r} has more fractional digits than the schema scale ({scale}) allows")
+    if not _decimal_fits_precision(converted, precision=precision, scale=scale):
+        raise InvalidPayload(f"{value!r} does not fit schema decimal precision {precision} with scale {scale}")
+    return converted
+
+
 class DeserializationError(Exception):
     pass
 
@@ -660,7 +680,10 @@ def _unfold_avro_json(
             extended_json_parser,
             path=f"{path}<{tag}>",
         )
-        converted_branch_value = convert_logical_types(selected_branch, unfolded_branch_value, extended_json_parser)
+        try:
+            converted_branch_value = convert_logical_types(selected_branch, unfolded_branch_value, extended_json_parser)
+        except InvalidPayload as e:
+            raise InvalidPayload(f"{path}: {e}") from e
         # Enforce strict constraints that may be too permissive in generic validate().
         if isinstance(selected_branch, avro.schema.EnumSchema):
             if not isinstance(converted_branch_value, str) or converted_branch_value not in selected_branch.symbols:
@@ -708,24 +731,24 @@ def convert_logical_types(schema: avro.schema.Schema, value: Any, extended_json_
     - time-millis / time-micros:
         int (ms/µs of day) -> datetime.time.
         str ISO 8601 (extended_json_parser only) -> datetime.time.
-    - decimal:
-        extended_json_parser=True: int or numeric string ("123.45", "-7")
-          -> decimal.Decimal quantized to schema scale (ROUND_HALF_UP).
-        extended_json_parser=False (default): Confluent-compatible Base64-encoded
-          two's complement unscaled bytes (e.g. "BZw=" for 14.36 at scale=2)
-          -> decimal.Decimal. Integer inputs are also accepted in both modes.
+    - decimal (both parser modes):
+        int or numeric string ("123.45", "-7") -> decimal.Decimal; more fractional
+          digits than the schema scale raise InvalidPayload (no silent rounding).
+        non-numeric string -> Confluent-compatible Base64-encoded two's complement
+          unscaled bytes (e.g. "BZw=" for 14.36 at scale=2) -> decimal.Decimal.
+        Strings that are neither numeric nor valid base64 raise InvalidPayload.
         float inputs are intentionally not accepted to avoid silent precision loss.
 
     Args:
         schema: The Avro schema for the current node.
         value: The JSON-decoded value to coerce.
         extended_json_parser: When True, temporal fields additionally accept ISO 8601
-            strings and decimal fields accept numeric strings. Defaults to False
-            (Confluent-compatible behaviour).
+            strings. Defaults to False (Confluent-compatible behaviour).
 
     For unions, each branch is tried in order; the first branch that validates after
-    conversion is returned. If conversion is not applicable or fails, the original
-    value is returned unchanged.
+    conversion is returned (branches whose conversion raises InvalidPayload are
+    skipped). If conversion is not applicable or fails, the original value is
+    returned unchanged.
     """
     if isinstance(schema, avro.schema.RecordSchema) and isinstance(value, dict):
         result: dict[Any, Any] = dict(value)
@@ -737,7 +760,12 @@ def convert_logical_types(schema: avro.schema.Schema, value: Any, extended_json_
     if isinstance(schema, avro.schema.UnionSchema):
         # Try to find a branch schema that validates after conversion.
         for branch in schema.schemas:
-            converted = convert_logical_types(branch, value, extended_json_parser)
+            try:
+                converted = convert_logical_types(branch, value, extended_json_parser)
+            except InvalidPayload:
+                # Conversion failed for this branch only: the value may still match
+                # another branch (e.g. a plain string next to a logical decimal).
+                continue
             if avro.io.validate(branch, converted):
                 return converted
         return value
@@ -833,33 +861,30 @@ def convert_logical_types(schema: avro.schema.Schema, value: Any, extended_json_
                 except ValueError:
                     return value
 
-        # Decimal: accept numeric values (int/str) or Confluent-style
-        # base64-encoded two's complement unscaled bytes (e.g. "BYw=" for 14.36 scale=2).
+        # Decimal: accept numeric values (int or numeric string) or Confluent-style
+        # base64-encoded two's complement unscaled bytes (e.g. "BZw=" for 14.36 scale=2).
         if logical_type == "decimal" and isinstance(value, (int, str)):
             scale: int = getattr(schema, "scale", 0)
             precision: int = getattr(schema, "precision", 0)
-            # Numeric path: int or decimal-looking string ("123.45", "-7")
-            if extended_json_parser:
-                if isinstance(value, int) or (isinstance(value, str) and _DECIMAL_STRING_RE.fullmatch(value)):
-                    try:
-                        converted = decimal.Decimal(str(value)).quantize(
-                            _DECIMAL_TEN**-scale, rounding=decimal.ROUND_HALF_UP
-                        )
-                        if _decimal_fits_precision(converted, precision=precision, scale=scale):
-                            return converted
-                        return value
-                    except (decimal.InvalidOperation, ValueError):
-                        return value
-            # Confluent base64 bytes path: base64 string or raw bytes
+            # Numeric path first, in both parser modes: ints are unambiguous, and
+            # numeric strings must round-trip — a value consumed as "14.36" must
+            # produce the same number, and "1436" must mean the number 1436 even
+            # though it also happens to be a valid base64 string.
+            if isinstance(value, int) or _DECIMAL_STRING_RE.fullmatch(value):
+                return _decimal_from_number(value, precision=precision, scale=scale)
+            # Confluent base64 bytes path: strings that are not numeric literals.
             try:
-                raw: bytes = base64.b64decode(value, validate=True) if isinstance(value, str) else value
-                unscaled = int.from_bytes(raw, byteorder="big", signed=True)
-                converted = decimal.Decimal(unscaled).scaleb(-scale)
-                if _decimal_fits_precision(converted, precision=precision, scale=scale):
-                    return converted
-                return value
-            except Exception:
-                return value
+                raw = base64.b64decode(value, validate=True)
+            except ValueError as e:
+                raise InvalidPayload(
+                    f"{value!r} is not a valid decimal value: expected a numeric string "
+                    f'(e.g. "14.36") or base64-encoded unscaled bytes'
+                ) from e
+            unscaled = int.from_bytes(raw, byteorder="big", signed=True)
+            converted = decimal.Decimal(unscaled).scaleb(-scale)
+            if not _decimal_fits_precision(converted, precision=precision, scale=scale):
+                raise InvalidPayload(f"{value!r} decodes to a decimal that does not fit schema precision {precision}")
+            return converted
 
     return value
 

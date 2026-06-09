@@ -3,7 +3,29 @@ Copyright (c) 2023 Aiven Ltd
 See LICENSE for details
 """
 
+from karapace.core.container import KarapaceContainer
+from karapace.core.schema_models import SchemaType, ValidatedTypedSchema, Versioner
+from karapace.core.serialization import (
+    convert_logical_types,
+    flatten_unions,
+    get_subject_name,
+    HEADER_FORMAT,
+    InvalidMessageHeader,
+    InvalidMessageSchema,
+    InvalidPayload,
+    SchemaRegistryClient,
+    SchemaRegistrySerializer,
+    SchemaRetrievalError,
+    sr_authorization_ctx,
+    START_BYTE,
+    write_value,
+)
+from karapace.core.typing import NameStrategy, Subject, SubjectType
+from tests.utils import schema_avro_json, test_objects_avro
+from unittest.mock import AsyncMock, call, Mock, patch
+
 import asyncio
+import avro
 import base64
 import copy
 import datetime
@@ -11,31 +33,8 @@ import decimal
 import io
 import json
 import logging
-import struct
-from unittest.mock import AsyncMock, Mock, call, patch
-
-import avro
 import pytest
-
-from karapace.core.container import KarapaceContainer
-from karapace.core.schema_models import SchemaType, ValidatedTypedSchema, Versioner
-from karapace.core.serialization import (
-    HEADER_FORMAT,
-    START_BYTE,
-    InvalidMessageHeader,
-    InvalidMessageSchema,
-    InvalidPayload,
-    SchemaRetrievalError,
-    SchemaRegistryClient,
-    SchemaRegistrySerializer,
-    flatten_unions,
-    convert_logical_types,
-    get_subject_name,
-    sr_authorization_ctx,
-    write_value,
-)
-from karapace.core.typing import NameStrategy, Subject, SubjectType
-from tests.utils import schema_avro_json, test_objects_avro
+import struct
 
 log = logging.getLogger(__name__)
 
@@ -390,7 +389,8 @@ def test_convert_logical_types_decimal_quantize_int() -> None:
     assert str(converted) == "12345.0000"
 
 
-def test_convert_logical_types_decimal_quantize_round() -> None:
+def test_convert_logical_types_decimal_scale_overflow_raises() -> None:
+    """More fractional digits than the schema scale must be an error, not a silent rounding."""
     schema_json = {
         "type": "bytes",
         "logicalType": "decimal",
@@ -398,10 +398,10 @@ def test_convert_logical_types_decimal_quantize_round() -> None:
         "scale": 2,
     }
     typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps(schema_json))
-    converted = convert_logical_types(typed_schema.schema, "12345.123", extended_json_parser=True)
 
-    assert isinstance(converted, decimal.Decimal)
-    assert str(converted) == "12345.12"
+    for extended in (False, True):
+        with pytest.raises(InvalidPayload, match="more fractional digits"):
+            convert_logical_types(typed_schema.schema, "12345.123", extended_json_parser=extended)
 
 
 def test_convert_logical_types_decimal_confluent_base64() -> None:
@@ -419,6 +419,7 @@ def test_convert_logical_types_decimal_confluent_base64() -> None:
 
 
 def test_convert_logical_types_decimal_invalid_base64() -> None:
+    """A string that is neither a number nor valid base64 must raise a clear error."""
     schema_json = {
         "type": "bytes",
         "logicalType": "decimal",
@@ -426,9 +427,75 @@ def test_convert_logical_types_decimal_invalid_base64() -> None:
         "scale": 2,
     }
     typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps(schema_json))
-    value = "not-base64!"
-    converted = convert_logical_types(typed_schema.schema, value)
-    assert converted == value
+    with pytest.raises(InvalidPayload, match="not a valid decimal value"):
+        convert_logical_types(typed_schema.schema, "not-base64!")
+
+
+def test_convert_logical_types_decimal_numeric_string_default_mode() -> None:
+    """Default (Confluent-compatible) mode must round-trip numeric strings produced by consume."""
+    schema_json = {
+        "type": "bytes",
+        "logicalType": "decimal",
+        "precision": 10,
+        "scale": 2,
+    }
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps(schema_json))
+
+    converted = convert_logical_types(typed_schema.schema, "14.36")
+    assert converted == decimal.Decimal("14.36")
+
+
+def test_convert_logical_types_decimal_digit_string_is_number_not_base64() -> None:
+    """ "1436" is a valid base64 string, but it must be parsed as the number 1436."""
+    schema_json = {
+        "type": "bytes",
+        "logicalType": "decimal",
+        "precision": 10,
+        "scale": 2,
+    }
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps(schema_json))
+
+    converted = convert_logical_types(typed_schema.schema, "1436")
+    assert converted == decimal.Decimal("1436.00")
+
+
+def test_convert_logical_types_decimal_int_default_mode() -> None:
+    schema_json = {
+        "type": "bytes",
+        "logicalType": "decimal",
+        "precision": 10,
+        "scale": 2,
+    }
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps(schema_json))
+
+    converted = convert_logical_types(typed_schema.schema, 1436)
+    assert converted == decimal.Decimal("1436.00")
+
+
+def test_convert_logical_types_decimal_negative_string_and_base64() -> None:
+    schema_json = {
+        "type": "bytes",
+        "logicalType": "decimal",
+        "precision": 10,
+        "scale": 2,
+    }
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps(schema_json))
+
+    assert convert_logical_types(typed_schema.schema, "-7.5") == decimal.Decimal("-7.50")
+    # base64 of two's complement unscaled -750 (b"\xfd\x12")
+    assert convert_logical_types(typed_schema.schema, "/RI=") == decimal.Decimal("-7.50")
+
+
+def test_convert_logical_types_decimal_union_branch_failure_is_not_fatal() -> None:
+    """A failing decimal conversion in one union branch must not break other branches."""
+    schema_json = [
+        {"type": "bytes", "logicalType": "decimal", "precision": 10, "scale": 2},
+        "string",
+    ]
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps(schema_json))
+
+    # Neither numeric nor base64: the decimal branch raises internally, the string branch wins.
+    assert convert_logical_types(typed_schema.schema, "garbage!") == "garbage!"
 
 
 def test_convert_logical_types_decimal_float_is_rejected() -> None:
