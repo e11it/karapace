@@ -10,6 +10,7 @@ from karapace.core.kafka.consumer import KafkaConsumer
 from karapace.core.kafka.producer import KafkaProducer
 
 import contextlib
+import secrets
 
 
 def get_oauth_token_provider(config: Config) -> object | None:
@@ -44,6 +45,7 @@ def kafka_admin_from_config(config: Config) -> KafkaAdminClient:
 def kafka_consumer_from_config(config: Config, topic: str) -> Iterator[KafkaConsumer]:
     kwargs: dict = dict(
         bootstrap_servers=config.bootstrap_uri,
+        group_id=f"{config.consumer_group_id_prefix}{secrets.token_hex(6)}",
         topic=topic,
         enable_auto_commit=False,
         client_id=config.client_id,

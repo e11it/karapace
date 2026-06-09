@@ -11,7 +11,12 @@ from collections.abc import Mapping
 from copy import deepcopy
 from typing import Literal
 
-from karapace.core.constants import DEFAULT_AIOHTTP_CLIENT_MAX_SIZE, DEFAULT_PRODUCER_MAX_REQUEST, DEFAULT_SCHEMA_TOPIC
+from karapace.core.constants import (
+    DEFAULT_AIOHTTP_CLIENT_MAX_SIZE,
+    DEFAULT_CONSUMER_GROUP_ID_PREFIX,
+    DEFAULT_PRODUCER_MAX_REQUEST,
+    DEFAULT_SCHEMA_TOPIC,
+)
 from karapace.core.typing import ElectionStrategy, NameStrategy
 from karapace.core.utils import json_encode
 from pathlib import Path
@@ -96,6 +101,7 @@ class Config(BaseSettings):
     compatibility: str = "BACKWARD"
     connections_max_idle_ms: int = 15000
     consumer_enable_auto_commit: bool = True
+    consumer_group_id_prefix: str = DEFAULT_CONSUMER_GROUP_ID_PREFIX
     consumer_request_timeout_ms: int = 11000
     consumer_request_max_bytes: int = 67108864
     consumer_idle_disconnect_timeout: int = 0
