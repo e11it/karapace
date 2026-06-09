@@ -534,10 +534,10 @@ Keys to take special care are the ones needed to configure Kafka and advertised_
      - Use REST API's calling authorization credentials to invoke Kafka operations over SASL authentication of ``sasl_bootstrap_uri`` to delegate REST proxy authorization to Kafka.  If false, then use configured common credentials for all Kafka connections of REST proxy operations.
    * - ``rest_avro_extended_json_parser``
      - ``false``
-     - Enables extended logical-type parsing for Avro REST payloads (for example ISO-8601 strings). For union logical types, provide an explicit type wrapper (for example ``{"date": "2025-05-05"}``) instead of untagged values.
+     - Enables extended logical-type parsing for Avro REST payloads (for example ISO-8601 strings). For union logical types, provide an explicit type wrapper (for example ``{"date": "2025-05-05"}``) instead of untagged values. See `REST proxy Avro logical types`_ below.
    * - ``rest_avro_permissive_json_parser``
      - ``true``
-     - Controls Avro JSON union parsing in REST proxy. When enabled (default), legacy permissive handling is used for backwards compatibility. When disabled, strict Avro JSON union tagging is enforced to avoid ambiguous branch selection.
+     - Controls Avro JSON union parsing in REST proxy. When enabled (default), legacy permissive handling is used for backwards compatibility. When disabled, strict Avro JSON union tagging is enforced to avoid ambiguous branch selection. See `REST proxy Avro logical types`_ below.
    * - ``rest_base_uri``
      - ``None``
      - Publicly available URI of this instance advertised to the clients using stateful operations such as creating consumers.  If not set, then construct URI using ``advertised_protocol``, ``advertised_hostname``, and ``advertised_port``.
@@ -595,6 +595,103 @@ Keys to take special care are the ones needed to configure Kafka and advertised_
        Should be an upper bound of the time required for a master to write a message in the kafka topic + the time required from a node in the cluster to consume the
        Log of messages. If the value its too low there is the risk under high load of producing different schemas with the ID.
 
+
+REST proxy Avro logical types
+=============================
+
+The REST proxy converts JSON payloads for Avro `logical types
+<https://avro.apache.org/docs/++version++/specification/#logical-types>`_
+(``date``, ``time-millis``, ``time-micros``, ``timestamp-millis``,
+``timestamp-micros``, ``decimal``, ``uuid``) when producing, and renders them in a
+human-readable JSON form when consuming. Two configuration keys control the
+parsing behaviour:
+
+* ``rest_avro_permissive_json_parser`` — how Avro JSON *unions* are parsed.
+* ``rest_avro_extended_json_parser`` — which *value representations* are accepted
+  for logical types.
+
+.. list-table::
+   :header-rows: 1
+
+   * - ``permissive_json_parser``
+     - ``extended_json_parser``
+     - Behaviour
+   * - ``true`` (default)
+     - ``false`` (default)
+     - Confluent-compatibility mode. Legacy permissive union handling: union
+       values may be sent with or without the Avro JSON union tag; ambiguous
+       payloads are mapped to the first matching branch. Logical types accept
+       numeric base values (days/millis/micros as integers). ``decimal`` accepts
+       Confluent-style base64-encoded unscaled bytes (e.g. ``"BZw="`` for
+       ``14.36`` at scale 2), plain integers (``1436``) and numeric strings
+       (``"14.36"``).
+   * - ``true``
+     - ``true``
+     - Permissive unions as above; temporal logical types additionally accept
+       ISO 8601 strings (e.g. ``"2025-05-05"`` for ``date``,
+       ``"2025-05-05T16:29:00.123+04:00"`` for ``timestamp-millis``). Strings
+       with a timezone offset are shifted to UTC before encoding.
+   * - ``false``
+     - ``false``
+     - Strict union tagging: union values must be wrapped with the exact Avro
+       branch name (fullname for named types, e.g.
+       ``{"com.example.Payload": {...}}``); ambiguous or untagged payloads are
+       rejected with HTTP 422. Logical type values are handled exactly as in the
+       Confluent-compatibility mode above.
+   * - ``false``
+     - ``true``
+     - Strict union tagging plus ISO 8601 strings for temporal logical types.
+       Within unions the logical type name itself can be used as the tag for
+       string values (e.g. ``{"date": "2025-05-05"}``).
+
+``rest_avro_extended_json_parser=false`` (the default) is the mode compatible
+with the Confluent REST proxy: produce payloads use the representations the
+Confluent proxy understands, most notably base64-encoded unscaled bytes for
+``decimal``. Numeric strings such as ``"14.36"`` are additionally accepted for
+``decimal`` fields so that values consumed through Karapace can be produced back
+unchanged.
+
+Round-trip format
+-----------------
+
+When consuming, logical type values are rendered as follows:
+
+.. list-table::
+   :header-rows: 1
+
+   * - Logical type
+     - Consume output
+     - Accepted produce input
+   * - ``date``
+     - ``"2019-04-14"``
+     - int days since epoch; ISO 8601 date string (extended parser only)
+   * - ``time-millis``
+     - ``"12:00:00"``
+     - int milliseconds of day in ``[0, 86400000)``; ISO 8601 time string (extended parser only)
+   * - ``time-micros``
+     - ``"12:00:00"``
+     - int microseconds of day in ``[0, 86400000000)``; ISO 8601 time string (extended parser only)
+   * - ``timestamp-millis``
+     - ``"2020-09-13T12:26:40Z"``
+     - int milliseconds since epoch; ISO 8601 datetime string (extended parser only)
+   * - ``timestamp-micros``
+     - ``"2020-09-13T12:26:40Z"``
+     - int microseconds since epoch; ISO 8601 datetime string (extended parser only)
+   * - ``decimal``
+     - ``"14.36"``
+     - numeric string or integer, or base64-encoded unscaled bytes (``"BZw="``); both parser modes
+   * - ``uuid``
+     - the string value
+     - string
+
+Because consume renders ``decimal`` as a numeric string and timestamps as
+"Z"-suffixed UTC datetimes, a record consumed through the REST proxy can be
+produced back unchanged in any parser mode for ``decimal`` fields, and with
+``rest_avro_extended_json_parser=true`` for the temporal types.
+
+``local-timestamp-millis`` and ``local-timestamp-micros`` are not supported by
+the Avro library used by Karapace; such fields are handled as plain ``long``
+values.
 
 Authentication and authorization of Karapace Schema Registry REST API
 =====================================================================

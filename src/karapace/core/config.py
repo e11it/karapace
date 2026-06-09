@@ -119,6 +119,9 @@ class Config(BaseSettings):
     # When False (default), the REST proxy bypasses Kafka ACLs.
     rest_authorization: bool = False
     rest_base_uri: str | None = None
+    # When False (default), Avro logical types accept only Confluent-compatible
+    # representations (numeric base values; decimal as base64 bytes or numbers).
+    # Set to True to additionally accept ISO 8601 strings for temporal logical types.
     rest_avro_extended_json_parser: bool = False
     # When True (default), legacy permissive Avro JSON parsing is used for unions.
     # Set to False to require strict Avro JSON union tagging and deterministic branch resolution.
