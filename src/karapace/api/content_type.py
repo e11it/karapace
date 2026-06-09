@@ -63,7 +63,8 @@ def negotiate_schema_content_type(request: Request) -> str:
     message["Content-Type"] = content_type_header or JSON_CONTENT_TYPE
     params = message.get_params()
     assert params is not None
-    content_type = params[0][0]
+    # Media type and subtype are case-insensitive (RFC 7231 section 3.1.1.1).
+    content_type = params[0][0].lower()
 
     if method in {"POST", "PUT"} and content_type not in SCHEMA_CONTENT_TYPES:
         raise _unsupported_media_type()
@@ -71,7 +72,7 @@ def negotiate_schema_content_type(request: Request) -> str:
     if accept_val:
         if accept_val in ("*/*", "*") or accept_val.startswith("*/"):
             return SCHEMA_RESPONSE_DEFAULT_CONTENT_TYPE
-        content_type_match = get_best_match(accept_val, SCHEMA_ACCEPT_VALUES)
+        content_type_match = get_best_match(accept_val.lower(), SCHEMA_ACCEPT_VALUES)
         if not content_type_match:
             LOG.debug("Unexpected Accept value: %r", accept_val)
             raise _not_acceptable()

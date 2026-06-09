@@ -73,6 +73,31 @@ def test_content_type_with_parameters_is_accepted() -> None:
 
 
 @pytest.mark.parametrize(
+    "content_type",
+    [
+        "APPLICATION/JSON",
+        "Application/Json",
+        "APPLICATION/VND.SCHEMAREGISTRY.V1+JSON",
+    ],
+)
+def test_content_type_is_case_insensitive(content_type: str) -> None:
+    req = _request("POST", {"Content-Type": content_type})
+    assert negotiate_schema_content_type(req) == SCHEMA_RESPONSE_DEFAULT_CONTENT_TYPE
+
+
+@pytest.mark.parametrize(
+    "accept,expected",
+    [
+        ("APPLICATION/JSON", "application/json"),
+        ("Application/Vnd.SchemaRegistry.V1+Json", "application/vnd.schemaregistry.v1+json"),
+    ],
+)
+def test_accept_header_is_case_insensitive(accept: str, expected: str) -> None:
+    req = _request("GET", {"Accept": accept})
+    assert negotiate_schema_content_type(req) == expected
+
+
+@pytest.mark.parametrize(
     "accept,expected",
     [
         ("application/vnd.schemaregistry.v1+json", "application/vnd.schemaregistry.v1+json"),
