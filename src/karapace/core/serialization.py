@@ -77,6 +77,9 @@ _MILLIS_PER_DAY = 86_400_000
 _MICROS_PER_DAY = 86_400_000_000
 _DECIMAL_TEN = decimal.Decimal(10)
 _DECIMAL_STRING_RE = re.compile(r"-?\d+(\.\d+)?([Ee][+-]?\d+)?")
+# Note: local-timestamp-millis/micros are intentionally absent. The patched avro
+# library does not implement them (avro.schema.parse warns and produces a plain
+# "long" with logical_type=None), so they can never reach logical-type handling.
 _LOGICAL_TYPE_FORMAT_HINTS: dict[str, str] = {
     "date": 'ISO-8601 date (e.g. "2025-05-05")',
     "timestamp-millis": 'ISO-8601 datetime with timezone (e.g. "2025-05-05T16:29:00.123+04:00")',
@@ -84,8 +87,6 @@ _LOGICAL_TYPE_FORMAT_HINTS: dict[str, str] = {
     "time-millis": 'ISO-8601 time (e.g. "16:29:00.123")',
     "time-micros": 'ISO-8601 time (e.g. "16:29:00.123456")',
     "decimal": 'numeric string (e.g. "14.36")',
-    "local-timestamp-millis": 'ISO-8601 local datetime (e.g. "2025-05-05T16:29:00.123")',
-    "local-timestamp-micros": 'ISO-8601 local datetime (e.g. "2025-05-05T16:29:00.123456")',
 }
 
 

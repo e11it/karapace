@@ -840,7 +840,11 @@ async def test_additional_logical_types_union_base_and_tag_behavior(
         topic_name_tag_ext,
         _payload(schema, {"example1": {case["logical_type"]: case["string_value"]}}),
     )
-    # Current implementation still does not parse local-timestamp strings.
+    # Explicit fixation: local-timestamp-millis/micros are NOT supported even with the
+    # extended parser. The patched avro library does not implement them - schema parsing
+    # downgrades them to a plain "long" (logical_type=None), so the logical-type union
+    # tag never resolves and ISO-8601 strings are rejected. Only the base "long" value
+    # with a base-type tag works (asserted above).
     _assert_status(tag_ext_status, expected_ok=case["logical_type"] == "uuid")
 
 
