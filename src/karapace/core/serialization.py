@@ -715,6 +715,47 @@ def _unfold_avro_json(
     return value
 
 
+_NEEDS_CONVERSION_ATTR = "_karapace_needs_logical_conversion"
+
+
+def _schema_needs_logical_conversion(schema: avro.schema.Schema) -> bool:
+    """True when convert_logical_types() can do any work for this schema.
+
+    Walks the schema tree once looking for logical types and bytes/fixed nodes
+    (the node kinds convert_logical_types() acts on) and memoizes the result on
+    the schema object, so the per-message permissive path can skip the conversion
+    walk entirely for schemas that do not need it.
+    """
+    cached = getattr(schema, _NEEDS_CONVERSION_ATTR, None)
+    if cached is None:
+        cached = _compute_needs_logical_conversion(schema, set())
+        setattr(schema, _NEEDS_CONVERSION_ATTR, cached)
+    return cached
+
+
+def _compute_needs_logical_conversion(schema: avro.schema.Schema, seen: set[int]) -> bool:
+    # Recursive schemas (a record referencing itself) must not loop forever.
+    if id(schema) in seen:
+        return False
+    seen.add(id(schema))
+
+    if isinstance(schema, avro.schema.LogicalSchema):
+        return True
+    if isinstance(schema, avro.schema.FixedSchema):
+        return True
+    if isinstance(schema, avro.schema.PrimitiveSchema):
+        return schema.fullname == "bytes" or getattr(schema, "logical_type", None) is not None
+    if isinstance(schema, avro.schema.RecordSchema):
+        return any(_compute_needs_logical_conversion(field.type, seen) for field in schema.fields)
+    if isinstance(schema, avro.schema.UnionSchema):
+        return any(_compute_needs_logical_conversion(branch, seen) for branch in schema.schemas)
+    if isinstance(schema, avro.schema.ArraySchema):
+        return _compute_needs_logical_conversion(schema.items, seen)
+    if isinstance(schema, avro.schema.MapSchema):
+        return _compute_needs_logical_conversion(schema.values, seen)
+    return False
+
+
 def convert_logical_types(schema: avro.schema.Schema, value: Any, extended_json_parser: bool = False) -> Any:
     """Recursively coerce JSON-friendly Avro values to logical Python types.
     https://avro.apache.org/docs/++version++/specification/#logical-types
@@ -931,18 +972,27 @@ def read_value(config: Config, schema: TypedSchema, bio: io.BytesIO, avro_reader
 
 def write_value(config: Config, schema: TypedSchema, bio: io.BytesIO, value: dict) -> None:
     if schema.schema_type is SchemaType.AVRO:
+        needs_conversion = _schema_needs_logical_conversion(schema.schema)
         if config.rest_avro_permissive_json_parser:
-            # Backwards compatibility: Support JSON encoded data without the tags for unions.
-            # First, try to convert logical types on the original value. If the resulting
-            # value validates against the schema, use it as-is to preserve backwards
-            # compatibility with existing union encodings. Otherwise, fall back to
-            # flattening unions and then converting logical types.
-            converted = convert_logical_types(schema.schema, value, config.rest_avro_extended_json_parser)
-            if avro.io.validate(schema.schema, converted):
-                data = converted
+            if not needs_conversion:
+                # Fast path: the schema has no logical types or bytes/fixed nodes, so
+                # the conversion walk would be a no-op for every message.
+                if avro.io.validate(schema.schema, value):
+                    data = value
+                else:
+                    data = flatten_unions(schema.schema, value)
             else:
-                flattened = flatten_unions(schema.schema, value)
-                data = convert_logical_types(schema.schema, flattened, config.rest_avro_extended_json_parser)
+                # Backwards compatibility: Support JSON encoded data without the tags for unions.
+                # First, try to convert logical types on the original value. If the resulting
+                # value validates against the schema, use it as-is to preserve backwards
+                # compatibility with existing union encodings. Otherwise, fall back to
+                # flattening unions and then converting logical types.
+                converted = convert_logical_types(schema.schema, value, config.rest_avro_extended_json_parser)
+                if avro.io.validate(schema.schema, converted):
+                    data = converted
+                else:
+                    flattened = flatten_unions(schema.schema, value)
+                    data = convert_logical_types(schema.schema, flattened, config.rest_avro_extended_json_parser)
         else:
             # Strict mode: only accept properly tagged union JSON.
             unfolded = _unfold_avro_json(
@@ -951,7 +1001,10 @@ def write_value(config: Config, schema: TypedSchema, bio: io.BytesIO, value: dic
                 config.rest_avro_extended_json_parser,
                 path="records[0].value",
             )
-            data = convert_logical_types(schema.schema, unfolded, config.rest_avro_extended_json_parser)
+            if needs_conversion:
+                data = convert_logical_types(schema.schema, unfolded, config.rest_avro_extended_json_parser)
+            else:
+                data = unfolded
             if not avro.io.validate(schema.schema, data):
                 raise InvalidPayload("records[0].value: value does not validate against Avro schema")
 

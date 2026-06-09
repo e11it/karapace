@@ -6,6 +6,7 @@ See LICENSE for details
 from karapace.core.container import KarapaceContainer
 from karapace.core.schema_models import SchemaType, ValidatedTypedSchema, Versioner
 from karapace.core.serialization import (
+    _schema_needs_logical_conversion,
     convert_logical_types,
     flatten_unions,
     get_subject_name,
@@ -514,6 +515,99 @@ def test_convert_logical_types_decimal_float_is_rejected() -> None:
 _MILLIS_PER_DAY = 86_400_000
 _MICROS_PER_DAY = 86_400_000_000
 _EPOCH = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+
+
+@pytest.mark.parametrize(
+    ("schema_json", "expected"),
+    [
+        ({"type": "record", "name": "R", "fields": [{"name": "a", "type": "int"}]}, False),
+        ({"type": "record", "name": "R", "fields": [{"name": "a", "type": ["null", "string"]}]}, False),
+        ({"type": "record", "name": "R", "fields": [{"name": "a", "type": "bytes"}]}, True),
+        (
+            {"type": "record", "name": "R", "fields": [{"name": "a", "type": {"type": "fixed", "name": "F", "size": 4}}]},
+            True,
+        ),
+        (
+            {
+                "type": "record",
+                "name": "R",
+                "fields": [{"name": "a", "type": {"type": "long", "logicalType": "timestamp-millis"}}],
+            },
+            True,
+        ),
+        (
+            {
+                "type": "record",
+                "name": "R",
+                "fields": [{"name": "a", "type": {"type": "array", "items": {"type": "int", "logicalType": "date"}}}],
+            },
+            True,
+        ),
+        (
+            {
+                "type": "record",
+                "name": "R",
+                "fields": [
+                    {"name": "a", "type": {"type": "map", "values": ["null", {"type": "int", "logicalType": "date"}]}}
+                ],
+            },
+            True,
+        ),
+        ({"type": "array", "items": "string"}, False),
+        ({"type": "string", "logicalType": "uuid"}, True),
+    ],
+)
+def test_schema_needs_logical_conversion_detection(schema_json, expected: bool) -> None:
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps(schema_json))
+    assert _schema_needs_logical_conversion(typed_schema.schema) is expected
+    # The result is memoized on the schema object.
+    assert getattr(typed_schema.schema, "_karapace_needs_logical_conversion") is expected
+
+
+def test_schema_needs_logical_conversion_recursive_schema() -> None:
+    """A record referencing itself must not send the schema walk into infinite recursion."""
+    plain = {
+        "type": "record",
+        "name": "Node",
+        "fields": [
+            {"name": "value", "type": "string"},
+            {"name": "next", "type": ["null", "Node"]},
+        ],
+    }
+    typed_plain = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps(plain))
+    assert _schema_needs_logical_conversion(typed_plain.schema) is False
+
+    with_logical = {
+        "type": "record",
+        "name": "Node",
+        "fields": [
+            {"name": "ts", "type": {"type": "long", "logicalType": "timestamp-millis"}},
+            {"name": "next", "type": ["null", "Node"]},
+        ],
+    }
+    typed_logical = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps(with_logical))
+    assert _schema_needs_logical_conversion(typed_logical.schema) is True
+
+
+def test_write_value_skips_conversion_for_plain_schema(karapace_container: KarapaceContainer) -> None:
+    """The fast path for schemas without logical types must produce identical bytes."""
+    schema_json = {
+        "type": "record",
+        "name": "Plain",
+        "fields": [
+            {"name": "name", "type": "string"},
+            {"name": "maybe", "type": ["null", "string"]},
+        ],
+    }
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps(schema_json))
+    config = karapace_container.config()
+
+    for record in ({"name": "x", "maybe": None}, {"name": "x", "maybe": {"string": "tagged"}}, {"name": "x", "maybe": "y"}):
+        with patch("karapace.core.serialization.convert_logical_types") as mock_convert:
+            buffer = io.BytesIO()
+            write_value(config, typed_schema, buffer, record)
+            mock_convert.assert_not_called()
+        assert buffer.getvalue()
 
 
 @pytest.mark.parametrize(
