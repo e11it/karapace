@@ -11,6 +11,7 @@ from avro.io import BinaryDecoder, BinaryEncoder, DatumReader, DatumWriter
 from cachetools import TTLCache
 from collections.abc import Callable, MutableMapping
 from google.protobuf.message import DecodeError
+from http import HTTPStatus
 from jsonschema import ValidationError
 from karapace.core.client import Client
 from karapace.core.config import Config
@@ -41,7 +42,6 @@ import contextvars
 import hashlib
 import io
 import struct
-from http import HTTPStatus
 import threading
 import weakref
 
