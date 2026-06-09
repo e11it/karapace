@@ -351,7 +351,9 @@ class SchemaRegistryClient:
         if "schema" not in json_result:
             raise SchemaRetrievalError(f"Invalid result format: {json_result}")
 
-        subjects = json_result.get("subjects")
+        # Normalize a missing/null "subjects" field to an empty list so callers can
+        # always rely on membership checks without tripping on None.
+        subjects = json_result.get("subjects") or []
 
         try:
             schema_type = SchemaType(json_result.get("schemaType", "AVRO"))
@@ -461,15 +463,26 @@ class SchemaRegistrySerializer:
             self.ids_to_schemas[schema_id] = schema
         return schema
 
+    async def _schema_id_has_subject(self, schema_id: SchemaId, subject: Subject) -> bool:
+        def subject_not_included(_: TypedSchema, subjects: list[Subject]) -> bool:
+            return subject not in (subjects or [])
+
+        try:
+            _, subjects = await self.get_schema_for_id(schema_id, need_new_call=subject_not_included)
+        except SchemaRetrievalError:
+            return False
+
+        return subject in (subjects or [])
+
     async def upsert_id_for_schema(
-        self, schema_typed: ValidatedTypedSchema, subject: str, lookup_first: bool = False
+        self, schema_typed: ValidatedTypedSchema, subject: Subject, lookup_first: bool = False
     ) -> SchemaId:
         assert self.registry_client, "must not call this method after the object is closed."
 
         schema_ser = str(schema_typed)
-
-        if schema_ser in self.schemas_to_ids:
-            return self.schemas_to_ids[schema_ser]
+        cached_schema_id = self.schemas_to_ids.get(schema_ser)
+        if cached_schema_id is not None and await self._schema_id_has_subject(cached_schema_id, subject):
+            return cached_schema_id
 
         schema_id: SchemaId | None = None
 
@@ -482,6 +495,10 @@ class SchemaRegistrySerializer:
         async with self.state_lock:
             self.schemas_to_ids[schema_ser] = schema_id
             self.ids_to_schemas[schema_id] = schema_typed
+            known_subjects = list(self.ids_to_subjects.get(schema_id, []))
+            if subject not in known_subjects:
+                known_subjects.append(subject)
+            self.ids_to_subjects[schema_id] = known_subjects
         return schema_id
 
     async def get_schema_for_id(

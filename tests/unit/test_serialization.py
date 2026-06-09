@@ -1181,6 +1181,164 @@ async def test_upsert_id_for_schema_uses_cache_after_first_lookup_or_register(
     ]
 
 
+async def test_upsert_id_for_schema_does_not_reuse_cached_id_from_other_subject(
+    karapace_container: KarapaceContainer,
+) -> None:
+    subject_1 = Subject("upsert-subject-cache-subject-1")
+    subject_2 = Subject("upsert-subject-cache-subject-2")
+    schema_id_1 = 81
+    schema_id_2 = 82
+    mock_registry_client = Mock()
+
+    post_first_future = asyncio.Future()
+    post_first_future.set_result(schema_id_1)
+    get_schema_for_id_future = asyncio.Future()
+    get_schema_for_id_future.set_result((TYPED_AVRO_SCHEMA, [subject_1]))
+    post_second_future = asyncio.Future()
+    post_second_future.set_result(schema_id_2)
+
+    mock_registry_client.post_new_schema.side_effect = [
+        post_first_future,
+        post_second_future,
+    ]
+    mock_registry_client.get_schema_for_id.return_value = get_schema_for_id_future
+
+    serializer = await make_ser_deser(karapace_container, mock_registry_client)
+    first_schema_id = await serializer.upsert_id_for_schema(TYPED_AVRO_SCHEMA, subject_1)
+    second_schema_id = await serializer.upsert_id_for_schema(TYPED_AVRO_SCHEMA, subject_2)
+
+    assert first_schema_id == schema_id_1
+    assert second_schema_id == schema_id_2
+    assert mock_registry_client.method_calls == [
+        call.post_new_schema(subject_1, TYPED_AVRO_SCHEMA),
+        call.get_schema_for_id(schema_id_1),
+        call.post_new_schema(subject_2, TYPED_AVRO_SCHEMA),
+    ]
+
+
+async def test_upsert_id_for_schema_key_subject_does_not_reuse_cached_id_from_value_subject(
+    karapace_container: KarapaceContainer,
+) -> None:
+    """schemas_to_ids is keyed by schema string only and is shared between key and value
+    schemas: an id cached for topic1-value must not leak to topic2-key."""
+    value_subject = Subject("upsert-key-cache-topic1-value")
+    key_subject = Subject("upsert-key-cache-topic2-key")
+    schema_id_1 = 83
+    schema_id_2 = 84
+    mock_registry_client = Mock()
+
+    post_first_future = asyncio.Future()
+    post_first_future.set_result(schema_id_1)
+    get_schema_for_id_future = asyncio.Future()
+    get_schema_for_id_future.set_result((TYPED_AVRO_SCHEMA, [value_subject]))
+    post_second_future = asyncio.Future()
+    post_second_future.set_result(schema_id_2)
+
+    mock_registry_client.post_new_schema.side_effect = [
+        post_first_future,
+        post_second_future,
+    ]
+    mock_registry_client.get_schema_for_id.return_value = get_schema_for_id_future
+
+    serializer = await make_ser_deser(karapace_container, mock_registry_client)
+    first_schema_id = await serializer.upsert_id_for_schema(TYPED_AVRO_SCHEMA, value_subject)
+    second_schema_id = await serializer.upsert_id_for_schema(TYPED_AVRO_SCHEMA, key_subject)
+
+    assert first_schema_id == schema_id_1
+    assert second_schema_id == schema_id_2
+    assert mock_registry_client.method_calls == [
+        call.post_new_schema(value_subject, TYPED_AVRO_SCHEMA),
+        call.get_schema_for_id(schema_id_1),
+        call.post_new_schema(key_subject, TYPED_AVRO_SCHEMA),
+    ]
+
+
+async def test_upsert_id_for_schema_topic_record_name_strategy_does_not_reuse_cached_id(
+    karapace_container: KarapaceContainer,
+) -> None:
+    """With the topic_record_name strategy the same schema produces a distinct subject per
+    topic; the id cached for the first topic's subject must not be reused for the second."""
+    subject_1 = get_subject_name(
+        topic_name="upsert-trn-topic1",
+        schema=TYPED_AVRO_SCHEMA,
+        subject_type=SubjectType.value,
+        naming_strategy=NameStrategy.topic_record_name,
+    )
+    subject_2 = get_subject_name(
+        topic_name="upsert-trn-topic2",
+        schema=TYPED_AVRO_SCHEMA,
+        subject_type=SubjectType.value,
+        naming_strategy=NameStrategy.topic_record_name,
+    )
+    assert subject_1 != subject_2
+    schema_id_1 = 85
+    schema_id_2 = 86
+    mock_registry_client = Mock()
+
+    post_first_future = asyncio.Future()
+    post_first_future.set_result(schema_id_1)
+    get_schema_for_id_future = asyncio.Future()
+    get_schema_for_id_future.set_result((TYPED_AVRO_SCHEMA, [subject_1]))
+    post_second_future = asyncio.Future()
+    post_second_future.set_result(schema_id_2)
+
+    mock_registry_client.post_new_schema.side_effect = [
+        post_first_future,
+        post_second_future,
+    ]
+    mock_registry_client.get_schema_for_id.return_value = get_schema_for_id_future
+
+    serializer = await make_ser_deser(karapace_container, mock_registry_client)
+    first_schema_id = await serializer.upsert_id_for_schema(TYPED_AVRO_SCHEMA, subject_1)
+    second_schema_id = await serializer.upsert_id_for_schema(TYPED_AVRO_SCHEMA, subject_2)
+
+    assert first_schema_id == schema_id_1
+    assert second_schema_id == schema_id_2
+    assert mock_registry_client.method_calls == [
+        call.post_new_schema(subject_1, TYPED_AVRO_SCHEMA),
+        call.get_schema_for_id(schema_id_1),
+        call.post_new_schema(subject_2, TYPED_AVRO_SCHEMA),
+    ]
+
+
+async def test_upsert_id_for_schema_reregisters_when_subjects_field_missing(
+    karapace_container: KarapaceContainer,
+) -> None:
+    """A registry response without the subjects field must not raise (subject in None)
+    but be treated as 'subject not bound to the cached id' and trigger re-registration."""
+    subject_1 = Subject("upsert-no-subjects-field-subject-1")
+    subject_2 = Subject("upsert-no-subjects-field-subject-2")
+    schema_id_1 = 87
+    schema_id_2 = 88
+    mock_registry_client = Mock()
+
+    post_first_future = asyncio.Future()
+    post_first_future.set_result(schema_id_1)
+    get_schema_for_id_future = asyncio.Future()
+    # Simulate a registry response lacking the subjects field altogether.
+    get_schema_for_id_future.set_result((TYPED_AVRO_SCHEMA, None))
+    post_second_future = asyncio.Future()
+    post_second_future.set_result(schema_id_2)
+
+    mock_registry_client.post_new_schema.side_effect = [
+        post_first_future,
+        post_second_future,
+    ]
+    mock_registry_client.get_schema_for_id.return_value = get_schema_for_id_future
+
+    serializer = await make_ser_deser(karapace_container, mock_registry_client)
+    first_schema_id = await serializer.upsert_id_for_schema(TYPED_AVRO_SCHEMA, subject_1)
+    second_schema_id = await serializer.upsert_id_for_schema(TYPED_AVRO_SCHEMA, subject_2)
+
+    assert first_schema_id == schema_id_1
+    assert second_schema_id == schema_id_2
+    assert mock_registry_client.method_calls == [
+        call.post_new_schema(subject_1, TYPED_AVRO_SCHEMA),
+        call.get_schema_for_id(schema_id_1),
+        call.post_new_schema(subject_2, TYPED_AVRO_SCHEMA),
+    ]
+
+
 async def test_deserialization_propagates_schema_retrieval_error(karapace_container: KarapaceContainer) -> None:
     mock_registry_client = Mock()
     mock_registry_client.get_schema_for_id.side_effect = SchemaRetrievalError("schema registry unavailable")
@@ -1513,6 +1671,45 @@ async def test_get_schema_for_id_forwards_authorization_header(reset_sr_authoriz
 
     _, kwargs = sr_client.client.get.call_args
     assert kwargs["headers"] == {"Authorization": "Bearer xyz"}
+
+
+async def test_get_schema_for_id_normalizes_missing_subjects_to_empty_list() -> None:
+    """A registry response without the subjects field must yield [], not None,
+    so membership checks downstream never raise TypeError."""
+    sr_client = SchemaRegistryClient()
+    get_future = asyncio.Future()
+    get_future.set_result(
+        _make_result(
+            {
+                "schema": schema_avro_json,
+                "schemaType": SchemaType.AVRO.value,
+            }
+        )
+    )
+    sr_client.client.get = Mock(return_value=get_future)
+
+    _, subjects = await sr_client.get_schema_for_id(1)
+
+    assert subjects == []
+
+
+async def test_get_schema_for_id_normalizes_null_subjects_to_empty_list() -> None:
+    sr_client = SchemaRegistryClient()
+    get_future = asyncio.Future()
+    get_future.set_result(
+        _make_result(
+            {
+                "schema": schema_avro_json,
+                "subjects": None,
+                "schemaType": SchemaType.AVRO.value,
+            }
+        )
+    )
+    sr_client.client.get = Mock(return_value=get_future)
+
+    _, subjects = await sr_client.get_schema_for_id(1)
+
+    assert subjects == []
 
 
 async def test_get_schema_recursive_forwards_authorization_header(reset_sr_authorization_ctx) -> None:
