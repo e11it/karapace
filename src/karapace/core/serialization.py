@@ -264,7 +264,9 @@ class SchemaRegistryClient:
         if "schema" not in json_result:
             raise SchemaRetrievalError(f"Invalid result format: {json_result}")
 
-        subjects = json_result.get("subjects")
+        # Normalize a missing/null "subjects" field to an empty list so callers can
+        # always rely on membership checks without tripping on None.
+        subjects = json_result.get("subjects") or []
 
         try:
             schema_type = SchemaType(json_result.get("schemaType", "AVRO"))
@@ -376,14 +378,14 @@ class SchemaRegistrySerializer:
 
     async def _schema_id_has_subject(self, schema_id: SchemaId, subject: Subject) -> bool:
         def subject_not_included(_: TypedSchema, subjects: list[Subject]) -> bool:
-            return subject not in subjects
+            return subject not in (subjects or [])
 
         try:
             _, subjects = await self.get_schema_for_id(schema_id, need_new_call=subject_not_included)
         except SchemaRetrievalError:
             return False
 
-        return subject in subjects
+        return subject in (subjects or [])
 
     async def upsert_id_for_schema(self, schema_typed: ValidatedTypedSchema, subject: Subject) -> SchemaId:
         assert self.registry_client, "must not call this method after the object is closed."
