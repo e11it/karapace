@@ -126,6 +126,7 @@ class Config(BaseSettings):
     # When True (default), legacy permissive Avro JSON parsing is used for unions.
     # Set to False to require strict Avro JSON union tagging and deterministic branch resolution.
     rest_avro_permissive_json_parser: bool = True
+    rest_lookup_schema_before_register: bool = False
     log_handler: str | None = "stdout"
     log_level: str = "DEBUG"
     log_format: str = "%(name)-20s\t%(threadName)s\t%(levelname)-8s\t%(message)s"

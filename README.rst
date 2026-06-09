@@ -541,6 +541,9 @@ Keys to take special care are the ones needed to configure Kafka and advertised_
    * - ``rest_base_uri``
      - ``None``
      - Publicly available URI of this instance advertised to the clients using stateful operations such as creating consumers.  If not set, then construct URI using ``advertised_protocol``, ``advertised_hostname``, and ``advertised_port``.
+   * - ``rest_lookup_schema_before_register``
+     - ``false``
+     - If true, REST Proxy resolves the schema of a produce request by first looking it up in the Schema Registry (``POST /subjects/{subject}``) and registers it only when the lookup does not find it.  Avoids requiring ``Write`` permissions on subjects whose schemas are already registered.  See `REST Proxy read-only schema lookup`_.
    * - ``sasl_bootstrap_uri``
      - ``None``
      - The URI to the Kafka service to use with the Kafka REST API when SASL authorization with REST is used.
@@ -801,6 +804,40 @@ These unique (per instance of the schema registry) consumer group names are pref
 
 .. _`documentation`: https://docs.confluent.io/platform/current/schema-registry/security/index.html#authorizing-access-to-the-schemas-topic
 .. _`permissions`: https://docs.confluent.io/platform/current/kafka/authorization.html#group-resource-type-operations
+
+REST Proxy read-only schema lookup
+==================================
+
+When running Karapace REST Proxy together with Schema Registry, you can control
+how the REST Proxy interacts with the registry when resolving schema IDs.
+
+By default, Karapace REST Proxy registers schemas on demand by calling
+``POST /subjects/{subject}/versions`` when a new schema is seen in a produce
+request. This requires ``Write`` permissions on the corresponding ``Subject:``
+resources in the Schema Registry ACL configuration.
+
+If you want REST Proxy to avoid registering schemas that already exist in the
+Schema Registry, enable the configuration option::
+
+  rest_lookup_schema_before_register = true
+
+When this option is enabled, REST Proxy will first try to look up an existing
+schema under the subject using::
+
+  POST /subjects/(string: subject)
+
+If the schema is found, the existing schema ID is used and no new registration
+is performed. Only if the lookup fails (schema not found) will REST Proxy fall
+back to registering the schema with ``POST /subjects/{subject}/versions``.
+
+Note that this removes the need for ``Write`` permissions on ``Subject:``
+resources only for schemas that are already registered. When the lookup does
+not find the schema, REST Proxy still falls back to registering it, so
+producing with a schema that has not been registered in advance continues to
+require ``Write`` permissions — with read-only credentials such a produce
+request fails. To run REST Proxy with read-only Schema Registry credentials,
+ensure all schemas are registered beforehand by a separate service holding
+``Write`` permissions.
 
 OAuth2 authentication and authorization of Karapace
 ===================================================

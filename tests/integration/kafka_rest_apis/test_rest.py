@@ -14,11 +14,13 @@ from dataclasses import dataclass
 from typing import Any
 
 import pytest
+from aiohttp import BasicAuth
 
 from karapace.core.client import Client
 from karapace.core.kafka.admin import KafkaAdminClient
 from karapace.core.kafka.producer import KafkaProducer
 from karapace.kafka_rest_apis import SUBJECT_VALID_POSTFIX, KafkaRest
+from karapace.kafka_rest_apis.error_codes import RESTErrorCodes
 from karapace.core.schema_type import SchemaType
 from karapace.version import __version__
 from tests.integration.conftest import REST_PRODUCER_MAX_REQUEST_BYTES
@@ -208,6 +210,101 @@ async def test_avro_publish(
             # mismatch_payload = {f"{pl_type}_schema_id": new_schema_id,"records": [{pl_type: o} for o in test_objects]}
             # res = await rest_client.post(url, json=mismatch_payload, headers=header)
             # assert res.status_code == 422, f"Expecting schema {second_schema_json} to not match records {test_objects}"
+
+
+async def test_avro_publish_with_lookup_first(
+    rest_async_lookup_first_registry_auth_client: Client,
+    registry_async_client_auth: Client,
+    admin_client: KafkaAdminClient,
+) -> None:
+    """Publish Avro records via REST Proxy with rest_lookup_schema_before_register=True.
+
+    The proxy talks to the Schema Registry as the ``reader`` user, which has no
+    Write permission on any subject. A successful produce of a pre-registered
+    schema therefore proves the schema id was resolved with the lookup
+    (``POST /subjects/{subject}``) and not by registering it again.
+    """
+    admin = BasicAuth("admin", "admin")
+    # The reader user only has the Read permission on Subject:carpet-.* resources.
+    topic_name = new_topic(admin_client, prefix="carpet-")
+    await wait_for_topics(
+        rest_async_lookup_first_registry_auth_client, topic_names=[topic_name], timeout=NEW_TOPIC_TIMEOUT, sleep=1
+    )
+
+    subject = f"{topic_name}-value"
+    register_response = await registry_async_client_auth.post(
+        f"subjects/{subject}/versions", json={"schema": schema_avro_json}, auth=admin
+    )
+    assert register_response.ok
+    expected_schema_id = register_response.json()["id"]
+
+    payload = {"value_schema": schema_avro_json, "records": [{"value": value} for value in test_objects_avro]}
+    publish_response = await rest_async_lookup_first_registry_auth_client.post(
+        f"/topics/{topic_name}",
+        json=payload,
+        headers=REST_HEADERS["avro"],
+    )
+
+    check_successful_publish_response(publish_response, test_objects_avro)
+    assert publish_response.json()["value_schema_id"] == expected_schema_id
+
+
+async def test_avro_publish_with_lookup_first_unregistered_schema_fails_without_write_permission(
+    rest_async_lookup_first_registry_auth_client: Client,
+    admin_client: KafkaAdminClient,
+) -> None:
+    """Lookup-first removes the Write requirement only for already registered schemas.
+
+    When the schema is not registered, the lookup misses and the proxy falls back
+    to registering the schema. With read-only credentials that registration is
+    denied, so the produce request fails.
+    """
+    topic_name = new_topic(admin_client, prefix="carpet-")
+    await wait_for_topics(
+        rest_async_lookup_first_registry_auth_client, topic_names=[topic_name], timeout=NEW_TOPIC_TIMEOUT, sleep=1
+    )
+
+    payload = {"value_schema": schema_avro_json, "records": [{"value": value} for value in test_objects_avro]}
+    publish_response = await rest_async_lookup_first_registry_auth_client.post(
+        f"/topics/{topic_name}",
+        json=payload,
+        headers=REST_HEADERS["avro"],
+    )
+
+    assert publish_response.status_code == 408
+    assert publish_response.json()["error_code"] == RESTErrorCodes.SCHEMA_RETRIEVAL_ERROR.value
+
+
+async def test_avro_publish_with_lookup_first_falls_back_to_register(
+    rest_async_lookup_first_client: Client,
+    registry_async_client: Client,
+    admin_client: KafkaAdminClient,
+) -> None:
+    """With write-capable credentials a lookup miss falls back to registration.
+
+    The schema is not pre-registered: the produce succeeds and the schema shows
+    up in the registry afterwards, proving the fallback registration path.
+    """
+    topic_name = new_topic(admin_client)
+    await wait_for_topics(rest_async_lookup_first_client, topic_names=[topic_name], timeout=NEW_TOPIC_TIMEOUT, sleep=1)
+
+    subject = f"{topic_name}-value"
+    subject_response = await registry_async_client.get(f"subjects/{subject}/versions")
+    assert subject_response.status_code == 404
+
+    payload = {"value_schema": schema_avro_json, "records": [{"value": value} for value in test_objects_avro]}
+    publish_response = await rest_async_lookup_first_client.post(
+        f"/topics/{topic_name}",
+        json=payload,
+        headers=REST_HEADERS["avro"],
+    )
+
+    check_successful_publish_response(publish_response, test_objects_avro)
+    registered_schema_id = publish_response.json()["value_schema_id"]
+
+    subject_response = await registry_async_client.get(f"subjects/{subject}/versions/latest")
+    assert subject_response.ok
+    assert subject_response.json()["id"] == registered_schema_id
 
 
 async def test_internal(rest_async: KafkaRest | None, admin_client: KafkaAdminClient) -> None:
