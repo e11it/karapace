@@ -5,16 +5,8 @@ Copyright (c) 2023 Aiven Ltd
 See LICENSE for details
 """
 
-import asyncio
-import json
-import os
-import time
-from http import HTTPStatus
-
-import pytest
-import requests
 from attr import dataclass
-
+from http import HTTPStatus
 from karapace.api.controller import SchemaErrorMessages
 from karapace.core.client import Client
 from karapace.core.kafka.producer import KafkaProducer
@@ -31,6 +23,13 @@ from tests.utils import (
     create_subject_name_factory,
     repeat_until_successful_request,
 )
+
+import asyncio
+import json
+import os
+import pytest
+import requests
+import time
 
 baseurl = "http://localhost:8081"
 

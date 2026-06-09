@@ -5,13 +5,13 @@ Copyright (c) 2026 Aiven Ltd
 See LICENSE for details
 """
 
-import pytest
 from fastapi import APIRouter, FastAPI
 from fastapi.testclient import TestClient
-from pydantic import BaseModel
-
 from karapace.api.content_type import SCHEMA_RESPONSE_DEFAULT_CONTENT_TYPE
 from karapace.api.routers.raw_path_router import SchemaRegistryRoute
+from pydantic import BaseModel
+
+import pytest
 
 
 @pytest.fixture

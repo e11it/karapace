@@ -6,8 +6,8 @@ See LICENSE for details
 from fastapi import HTTPException, Request, status
 from karapace.api.content_type import (
     JSON_CONTENT_TYPE,
-    SCHEMA_RESPONSE_DEFAULT_CONTENT_TYPE,
     negotiate_schema_content_type,
+    SCHEMA_RESPONSE_DEFAULT_CONTENT_TYPE,
 )
 
 import pytest

@@ -3,12 +3,12 @@ Copyright (c) 2024 Aiven Ltd
 See LICENSE for details
 """
 
+from collections.abc import Sequence
 from fastapi import FastAPI, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from http import HTTPStatus
-from collections.abc import Sequence
 from karapace.api.routers.errors import KarapaceValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import Request as StarletteHTTPRequest
