@@ -5,16 +5,8 @@ Copyright (c) 2023 Aiven Ltd
 See LICENSE for details
 """
 
-import asyncio
-import json
-import os
-import time
-from http import HTTPStatus
-
-import pytest
-import requests
 from attr import dataclass
-
+from http import HTTPStatus
 from karapace.api.controller import SchemaErrorMessages
 from karapace.core.client import Client
 from karapace.core.kafka.producer import KafkaProducer
@@ -31,6 +23,13 @@ from tests.utils import (
     create_subject_name_factory,
     repeat_until_successful_request,
 )
+
+import asyncio
+import json
+import os
+import pytest
+import requests
+import time
 
 baseurl = "http://localhost:8081"
 
@@ -2079,13 +2078,36 @@ async def test_http_headers(registry_async_client: Client) -> None:
     # Giving an invalid Accept value
     res = await registry_async_client.get("subjects", headers={"Accept": "application/vnd.schemaregistry.v2+json"})
     assert res.status_code == 406
-    assert res.json()["message"] == "HTTP 406 Not Acceptable"
+    assert res.json() == {"error_code": 406, "message": "HTTP 406 Not Acceptable"}
 
     # PUT with an invalid Content type
     res = await registry_async_client.put("config", json={"compatibility": "NONE"}, headers={"Content-Type": "text/html"})
     assert res.status_code == 415
-    assert res.json()["message"] == "HTTP 415 Unsupported Media Type"
+    assert res.json() == {"error_code": 415, "message": "HTTP 415 Unsupported Media Type"}
     assert res.headers["Content-Type"] == "application/vnd.schemaregistry.v1+json"
+
+    # POST with a body but no Content-Type should fail content negotiation before body validation.
+    client = await registry_async_client.get_client()
+    schema_payload = json.dumps(
+        {
+            "schema": json.dumps(
+                {
+                    "type": "record",
+                    "name": "test",
+                    "fields": [{"type": "string", "name": "field1"}],
+                }
+            )
+        }
+    ).encode()
+    async with client.post(
+        registry_async_client.path_for("subjects/test_no_content_type/versions"),
+        data=schema_payload,
+        skip_auto_headers={"Content-Type"},
+        ssl=registry_async_client.ssl_mode,
+    ) as missing_content_type_res:
+        assert missing_content_type_res.status == 415
+        assert await missing_content_type_res.json() == {"error_code": 415, "message": "HTTP 415 Unsupported Media Type"}
+        assert missing_content_type_res.headers["Content-Type"] == "application/vnd.schemaregistry.v1+json"
 
     # Multiple Accept values
     res = await registry_async_client.get(
@@ -2108,7 +2130,7 @@ async def test_http_headers(registry_async_client: Client) -> None:
     assert res.headers["Content-Type"] == "application/vnd.schemaregistry.v1+json"
     res = await registry_async_client.get("subjects", headers={"Accept": "text/*"})
     assert res.status_code == 406
-    assert res.json()["message"] == "HTTP 406 Not Acceptable"
+    assert res.json() == {"error_code": 406, "message": "HTTP 406 Not Acceptable"}
 
     # Accept without any type works
     res = await registry_async_client.get("subjects", headers={"Accept": "*/does_not_matter"})

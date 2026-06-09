@@ -6,8 +6,8 @@ See LICENSE for details
 from fastapi import HTTPException, Request, status
 from karapace.api.content_type import (
     JSON_CONTENT_TYPE,
-    SCHEMA_RESPONSE_DEFAULT_CONTENT_TYPE,
     negotiate_schema_content_type,
+    SCHEMA_RESPONSE_DEFAULT_CONTENT_TYPE,
 )
 
 import pytest
@@ -48,6 +48,7 @@ def test_post_put_reject_unsupported_content_type(method: str) -> None:
         negotiate_schema_content_type(req)
 
     assert exc_info.value.status_code == status.HTTP_415_UNSUPPORTED_MEDIA_TYPE
+    assert exc_info.value.detail == {"error_code": 415, "message": "HTTP 415 Unsupported Media Type"}
 
 
 def test_get_ignores_content_type_check() -> None:
@@ -55,14 +56,56 @@ def test_get_ignores_content_type_check() -> None:
     assert negotiate_schema_content_type(req) == SCHEMA_RESPONSE_DEFAULT_CONTENT_TYPE
 
 
-def test_missing_content_type_defaults_to_json() -> None:
-    req = _request("POST")
-    assert negotiate_schema_content_type(req) == SCHEMA_RESPONSE_DEFAULT_CONTENT_TYPE
+@pytest.mark.parametrize("method", ["POST", "PUT"])
+def test_missing_content_type_returns_415(method: str) -> None:
+    req = _request(method)
+
+    with pytest.raises(HTTPException) as exc_info:
+        negotiate_schema_content_type(req)
+
+    assert exc_info.value.status_code == status.HTTP_415_UNSUPPORTED_MEDIA_TYPE
+    assert exc_info.value.detail == {"error_code": 415, "message": "HTTP 415 Unsupported Media Type"}
+
+
+@pytest.mark.parametrize("content_type", ["", "   "])
+def test_blank_content_type_returns_415(content_type: str) -> None:
+    req = _request("POST", {"Content-Type": content_type})
+
+    with pytest.raises(HTTPException) as exc_info:
+        negotiate_schema_content_type(req)
+
+    assert exc_info.value.status_code == status.HTTP_415_UNSUPPORTED_MEDIA_TYPE
+    assert exc_info.value.detail == {"error_code": 415, "message": "HTTP 415 Unsupported Media Type"}
 
 
 def test_content_type_with_parameters_is_accepted() -> None:
     req = _request("POST", {"Content-Type": f"{JSON_CONTENT_TYPE}; charset=utf-8"})
     assert negotiate_schema_content_type(req) == SCHEMA_RESPONSE_DEFAULT_CONTENT_TYPE
+
+
+@pytest.mark.parametrize(
+    "content_type",
+    [
+        "APPLICATION/JSON",
+        "Application/Json",
+        "APPLICATION/VND.SCHEMAREGISTRY.V1+JSON",
+    ],
+)
+def test_content_type_is_case_insensitive(content_type: str) -> None:
+    req = _request("POST", {"Content-Type": content_type})
+    assert negotiate_schema_content_type(req) == SCHEMA_RESPONSE_DEFAULT_CONTENT_TYPE
+
+
+@pytest.mark.parametrize(
+    "accept,expected",
+    [
+        ("APPLICATION/JSON", "application/json"),
+        ("Application/Vnd.SchemaRegistry.V1+Json", "application/vnd.schemaregistry.v1+json"),
+    ],
+)
+def test_accept_header_is_case_insensitive(accept: str, expected: str) -> None:
+    req = _request("GET", {"Accept": accept})
+    assert negotiate_schema_content_type(req) == expected
 
 
 @pytest.mark.parametrize(
@@ -91,6 +134,7 @@ def test_unsupported_accept_raises_406() -> None:
         negotiate_schema_content_type(req)
 
     assert exc_info.value.status_code == status.HTTP_406_NOT_ACCEPTABLE
+    assert exc_info.value.detail == {"error_code": 406, "message": "HTTP 406 Not Acceptable"}
 
 
 def test_missing_accept_returns_default() -> None:
