@@ -33,6 +33,7 @@ from karapace.core.serialization import (
     InvalidPayload,
     SchemaRegistrySerializer,
     SchemaRetrievalError,
+    sr_authorization_ctx,
 )
 from karapace.core.typing import NameStrategy, SchemaId, Subject, SubjectType
 from karapace.core.utils import json_encode
@@ -79,7 +80,14 @@ class KafkaRest(KarapaceBase):
         self.serializer = SchemaRegistrySerializer(config=config)
         self.proxies: dict[str, UserRestProxy] = {}
         self._proxy_lock = asyncio.Lock()
-        log.info("REST proxy starting with (delegated authorization=%s)", self.config.rest_authorization)
+        if self.config.rest_authorization:
+            log.info("REST proxy starting with delegated authorization enabled")
+        else:
+            log.warning(
+                "REST proxy starting with authorization disabled (rest_authorization=false). "
+                "All Kafka ACLs will be bypassed for REST proxy requests. "
+                "Set rest_authorization=true and configure sasl_bootstrap_uri."
+            )
         self._idle_proxy_janitor_task: asyncio.Task | None = None
 
     async def close(self) -> None:
@@ -634,6 +642,8 @@ class UserRestProxy:
         )
 
     async def fetch(self, group_name: str, instance: str, content_type: str, *, request: HTTPRequest) -> None:
+        if self.config.sasl_oauthbearer_authentication_enabled:
+            sr_authorization_ctx.set(request.headers.get("Authorization"))
         await self.consumer_manager.fetch(
             internal_name=ConsumerManager.create_internal_name(group_name, instance),
             content_type=content_type,
@@ -791,6 +801,9 @@ class UserRestProxy:
         """
         formats: dict = request.content_type
         data: dict = request.json
+        # Forward inbound Authorization to SR only when SR-side OIDC is on.
+        if self.config.sasl_oauthbearer_authentication_enabled:
+            sr_authorization_ctx.set(request.headers.get("Authorization"))
         _ = await self.get_topic_info(topic, content_type)
         if partition_id is not None:
             _ = await self.get_partition_info(topic, partition_id, content_type)

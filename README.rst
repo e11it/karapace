@@ -107,9 +107,9 @@ Run
 ^^^
 - Make sure kafka is running.
 
-Start Karapace. This shout start karapace on http://localhost:8081 ::
+Start Karapace. This should start karapace on http://localhost:8081 ::
 
-  $ karapace karapace.config.json
+    python -m karapace
 
 Verify in browser http://localhost:8081/subjects should return an array of subjects if exist or an empty array.
 or with curl ::
@@ -118,10 +118,25 @@ or with curl ::
 
 To enable oidc authentication on the karapace, configure oidc jwks url config details ::
 
+   sasl_oauthbearer_authentication_enabled: bool = True
    sasl_oauthbearer_jwks_endpoint_url = "",
    sasl_oauthbearer_expected_issuer = "",
    sasl_oauthbearer_expected_audience = "",
    sasl_oauthbearer_sub_claim_name = "sub",
+
+When ``sasl_oauthbearer_authentication_enabled`` is true, every request must carry a valid
+Bearer token (the JWT signature, issuer, audience and the configured subject claim are
+verified via JWKS). Authorization (role-based access) is opt-in on top of this with
+``sasl_oauthbearer_authorization_enabled``.
+
+Optional hardening flags::
+
+   sasl_oauthbearer_leeway_seconds: int = 0           # clock-skew tolerance for exp/nbf/iat (must be >= 0)
+   sasl_oauthbearer_require_access_token_typ: bool = False  # require typ "at+jwt" header
+   sasl_oauthbearer_enforce_azp: bool = False         # require azp claim == client_id
+
+``sasl_oauthbearer_enforce_azp=true`` requires ``sasl_oauthbearer_client_id`` to be set;
+startup fails otherwise.
 
 There is a detailed section about OAuth2 authentication for karapace below.
 
@@ -132,11 +147,17 @@ To enable oidc authorization on karapace, configure the below params together wi
    sasl_oauthbearer_roles_claim_path: str | None = None
    sasl_oauthbearer_method_roles: dict[str, list[str]] = {"GET": [], "POST": [], "PUT": [], "DELETE": []}
 
+Note: ``sasl_oauthbearer_authorization_enabled=true`` requires
+``sasl_oauthbearer_authentication_enabled=true``. For backwards compatibility, enabling
+authorization without explicitly enabling authentication will auto-enable authentication and
+log a deprecation warning — set both flags explicitly.
+
 There is a detailed section about OAuth2 authorization for karapace below.
 
 Start Karapace rest proxy. This shout start karapace on http://localhost:8082 ::
 
-    karapace rest-proxy-karapace.config.json
+        python -m karapace.kafka_rest_apis
+
 
 To enable authorization & authentication on the rest proxy, configure 'sasl_mechanism' in the config with values like PLAIN/OAUTHBEARER ::
 
@@ -148,7 +169,7 @@ To enable authorization & authentication on the rest proxy, configure 'sasl_mech
 If 'sasl_mechanism' is configured to PLAIN::
 
     sasl_mechanism = "PLAIN",
-    security_protocol = "SASL_PLAIN",
+    security_protocol = "SASL_PLAINTEXT",
     sasl_plain_username = "your_username",
     sasl_plain_password = "your_password"
 
@@ -369,25 +390,19 @@ Keys to take special care are the ones needed to configure Kafka and advertised_
    * - Parameter
      - Default Value
      - Description
-   * - ``http_request_max_size``
-     - ``1048576``
-     - The maximum client HTTP request size. This value controls how large (POST) payloads are allowed. When configuration of ``karapace_rest`` is set to `true` and ``http_request_max_size`` is not set, Karapace configuration adapts the allowed client max size from the ``producer_max_request_size``. In cases where automatically selected size is not enough the configuration can be overridden by setting a value in configuration. For schema registry operation set the client max size according to expected size of schema payloads if default size is not enough.
-   * - ``advertised_protocol``
-     - ``http``
-     - The protocol being advertised to other instances of Karapace that are attached to the same Kafka group.
    * - ``advertised_hostname``
      - ``socket.gethostname()``
      - The hostname being advertised to other instances of Karapace that are attached to the same Kafka group.  All nodes within the cluster need to have their ``advertised_hostname``'s set so that they can all reach each other.
    * - ``advertised_port``
      - ``None``
      - The port being advertised to other instances of Karapace that are attached to the same Kafka group.  Fallbacks to ``port`` if not set.
+   * - ``advertised_protocol``
+     - ``http``
+     - The protocol being advertised to other instances of Karapace that are attached to the same Kafka group.
    * - ``bootstrap_uri``
      - ``localhost:9092``
      - The URI to the Kafka service where to store the schemas and to run
        coordination among the Karapace instances.
-   * - ``sasl_bootstrap_uri``
-     - ``None``
-     - The URI to the Kafka service to use with the Kafka REST API when SASL authorization with REST is used.
    * - ``client_id``
      - ``sr-1``
      - The ``client_id`` Karapace will use when coordinating with
@@ -397,21 +412,57 @@ Keys to take special care are the ones needed to configure Kafka and advertised_
    * - ``consumer_enable_autocommit``
      - ``True``
      - Enable auto commit on rest proxy consumers
-   * - ``consumer_request_timeout_ms``
-     - ``11000``
-     - Rest proxy consumers timeout for reads that do not limit the max bytes or provide their own timeout
-   * - ``consumer_request_max_bytes``
-     - ``67108864``
-     - Rest proxy consumers maximum bytes to be fetched per request
    * - ``consumer_idle_disconnect_timeout``
      - ``0``
      - Disconnect idle consumers after timeout seconds if not used.  Inactivity leads to consumer leaving consumer group and consumer state.  0 (default) means no auto-disconnect.
+   * - ``consumer_request_max_bytes``
+     - ``67108864``
+     - Rest proxy consumers maximum bytes to be fetched per request
+   * - ``consumer_request_timeout_ms``
+     - ``11000``
+     - Rest proxy consumers timeout for reads that do not limit the max bytes or provide their own timeout
    * - ``fetch_min_bytes``
      - ``1``
      - Rest proxy consumers minimum bytes to be fetched per request.
    * - ``group_id``
      - ``schema-registry``
      - The Kafka group name used for selecting a master service to coordinate the storing of Schemas.
+   * - ``host``
+     - ``127.0.0.1``
+     - Listening host for the Karapace server.  Use an empty string to
+       listen to all available networks.
+   * - ``http_request_max_size``
+     - ``1048576``
+     - The maximum client HTTP request size. This value controls how large (POST) payloads are allowed. When configuration of ``karapace_rest`` is set to `true` and ``http_request_max_size`` is not set, Karapace configuration adapts the allowed client max size from the ``producer_max_request_size``. In cases where automatically selected size is not enough the configuration can be overridden by setting a value in configuration. For schema registry operation set the client max size according to expected size of schema payloads if default size is not enough.
+   * - ``kafka_retriable_errors_silenced``
+     - ``true``
+     - If enabled, kafka errors which can be retried or custom errors specified for the service will not be raised,
+       instead, a warning log is emitted. This will denoise issue tracking systems, i.e. sentry
+   * - ``kafka_schema_reader_strict_mode``
+     - ``false``
+     - If enabled, causes the Karapace schema-registry service to shutdown when there are invalid schema records in the `_schemas` topic
+   * - ``karapace_registry``
+     - ``true``
+     - If the registry part of the app should be included in the starting process
+       At least one of this and ``karapace_rest`` options need to be enabled in order
+       for the service to start
+   * - ``karapace_rest``
+     - ``true``
+     - If the rest part of the app should be included in the starting process
+       At least one of this and ``karapace_registry`` options need to be enabled in order
+       for the service to start
+   * - ``log_format``
+     - ``%(name)-20s\t%(threadName)s\t%(levelname)-8s\t%(message)s``
+     - Log format
+   * - ``log_handler``
+     - ``stdout``
+     - Select the log handler. Default is standard output. Alternative log handler is ``systemd``.
+   * - ``log_level``
+     - ``DEBUG``
+     - Logging level. Default level is debug.
+   * - ``master_election_strategy``
+     - ``lowest``
+     - Decides on what basis the Karapace cluster master is chosen (only relevant in a multi node setup)
    * - ``master_eligibility``
      - ``true``
      - Should the service instance be considered for promotion to the master
@@ -419,13 +470,25 @@ Keys to take special care are the ones needed to configure Kafka and advertised_
        running somewhere else for HA purposes but which you wouldn't want to
        automatically promote to master if the primary instances become
        unavailable.
-   * - ``producer_compression_type``
-     - ``None``
-     - Type of compression to be used by rest proxy producers
+   * - ``metadata_max_age_ms``
+     - ``60000``
+     - Period of time in milliseconds after Kafka metadata is force refreshed.
+   * - ``name_strategy``
+     - ``topic_name``
+     - Name strategy to use when storing schemas from the kafka rest proxy service. You can opt between ``topic_name`` , ``record_name`` and ``topic_record_name``
+   * - ``name_strategy_validation``
+     - ``true``
+     - If enabled, validate that given schema is registered under used name strategy when producing messages from Kafka Rest
+   * - ``port``
+     - ``8081``
+     - Listening port for the Karapace server.
    * - ``producer_acks``
      - ``1``
      - Level of consistency desired by each producer message sent on the rest proxy.
        More on `Kafka Producer <https://kafka.apache.org/10/javadoc/org/apache/kafka/clients/producer/KafkaProducer.html>`__
+   * - ``producer_compression_type``
+     - ``None``
+     - Type of compression to be used by rest proxy producers
    * - ``producer_linger_ms``
      - ``0``
      - Time to wait for grouping together requests.
@@ -434,15 +497,77 @@ Keys to take special care are the ones needed to configure Kafka and advertised_
      - ``1048576``
      - The maximum size of a request in bytes.
        More on `Kafka Producer configs <https://kafka.apache.org/documentation/#producerconfigs_max.request.size>`_
+   * - ``protobuf_runtime_directory``
+     - ``runtime``
+     - Runtime directory for the ``protoc`` protobuf schema parser and code generator
+   * - ``registry_authfile``
+     - ``/path/to/authfile.json``
+     - Filename to specify users and access control rules for Karapace Schema Registry.
+       If this is set, Schema Registry requires authentication for most of the endpoints and applies per endpoint authorization rules.
+   * - ``registry_ca``
+     - ``/path/to/cafile``
+     - Kafka Registry CA certificate, used by Kafka Rest for Avro related requests.
+       If this is set, Kafka Rest will use HTTPS to connect to the registry.
+       If running both in the same process, it should be left to its default value
+   * - ``registry_host``
+     - ``127.0.0.1``
+     - Schema Registry host, used by Kafka Rest for schema related requests.
+       If running both in the same process, it should be left to its default value
+   * - ``registry_password``
+     - ``None``
+     - Schema Registry password for authentication, used by Kafka Rest for schema related requests.
+   * - ``registry_port``
+     - ``8081``
+     - Schema Registry port, used by Kafka Rest for schema related requests.
+       If running both in the same process, it should be left to its default value
+   * - ``registry_scheme``
+     - ``http``
+     - Schema Registry scheme to use for rest-proxy, http | https (if certificates are provided).
+   * - ``registry_user``
+     - ``None``
+     - Schema Registry user for authentication, used by Kafka Rest for schema related requests.
+   * - ``replication_factor``
+     - ``1``
+     - The replication factor to be used with the schema topic.
+   * - ``rest_authorization``
+     - ``false``
+     - Use REST API's calling authorization credentials to invoke Kafka operations over SASL authentication of ``sasl_bootstrap_uri`` to delegate REST proxy authorization to Kafka.  If false, then use configured common credentials for all Kafka connections of REST proxy operations.
+   * - ``rest_base_uri``
+     - ``None``
+     - Publicly available URI of this instance advertised to the clients using stateful operations such as creating consumers.  If not set, then construct URI using ``advertised_protocol``, ``advertised_hostname``, and ``advertised_port``.
+   * - ``sasl_bootstrap_uri``
+     - ``None``
+     - The URI to the Kafka service to use with the Kafka REST API when SASL authorization with REST is used.
+   * - ``sasl_mechanism``
+     - ``None``
+     - SASL mechanism for Kafka authentication (e.g. ``PLAIN``, ``SCRAM-SHA-512``, ``OAUTHBEARER``). Used together with ``security_protocol``.
+   * - ``sasl_plain_password``
+     - ``None``
+     - Password for Kafka SASL ``PLAIN`` authentication.
+   * - ``sasl_plain_username``
+     - ``None``
+     - Username for Kafka SASL ``PLAIN`` authentication.
    * - ``security_protocol``
      - ``PLAINTEXT``
      - Default Kafka security protocol needed to communicate with the Kafka
        cluster.  Other options is to use SSL for SSL client certificate
-       authentication.
+       authentication, or SASL_PLAINTEXT / SASL_SSL for simple authentication.
    * - ``sentry``
      - ``None``
      - Used to configure parameters for sentry integration (dsn, tags, ...). Setting the
        environment variable ``SENTRY_DSN`` will also enable sentry integration.
+   * - ``server_tls_cafile``
+     - ``/path/to/cafile``
+     - Filename to the SSL CA certificate.
+   * - ``server_tls_certfile``
+     - ``/path/to/certfile``
+     - Filename to a certificate chain for the Karapace server in HTTPS mode.
+   * - ``server_tls_client_auth``
+     - ``none``
+     - Client certificate requirement: ``none``, ``optional``, or ``required``.
+   * - ``server_tls_keyfile``
+     - ``/path/to/keyfile``
+     - Filename to a private key for the Karapace server in HTTPS mode.
    * - ``ssl_cafile``
      - ``/path/to/cafile``
      - Used when ``security_protocol`` is set to SSL, the path to the SSL CA certificate.
@@ -455,104 +580,9 @@ Keys to take special care are the ones needed to configure Kafka and advertised_
    * - ``topic_name``
      - ``_schemas``
      - The name of the Kafka topic where to store the schemas.
-   * - ``replication_factor``
-     - ``1``
-     - The replication factor to be used with the schema topic.
-   * - ``host``
-     - ``127.0.0.1``
-     - Listening host for the Karapace server.  Use an empty string to
-       listen to all available networks.
-   * - ``port``
-     - ``8081``
-     - Listening port for the Karapace server.
-   * - ``server_tls_certfile``
-     - ``/path/to/certfile``
-     - Filename to a certificate chain for the Karapace server in HTTPS mode.
-   * - ``server_tls_keyfile``
-     - ``/path/to/keyfile``
-     - Filename to a private key for the Karapace server in HTTPS mode.
-   * - ``server_tls_cafile``
-     - ``/path/to/cafile``
-     - Filename to the SSL CA certificate.
-   * - ``server_tls_client_auth``
-     - ``none``
-     - Client certificate requirement: ``none``, ``optional``, or ``required``.
-   * - ``registry_scheme``
-     - ``http``
-     - Schema Registry scheme to use for rest-proxy, http | https (if certificates are provided).
-   * - ``registry_host``
-     - ``127.0.0.1``
-     - Schema Registry host, used by Kafka Rest for schema related requests.
-       If running both in the same process, it should be left to its default value
-   * - ``registry_port``
-     - ``8081``
-     - Schema Registry port, used by Kafka Rest for schema related requests.
-       If running both in the same process, it should be left to its default value
-   * - ``registry_user``
-     - ``None``
-     - Schema Registry user for authentication, used by Kafka Rest for schema related requests.
-   * - ``registry_password``
-     - ``None``
-     - Schema Registry password for authentication, used by Kafka Rest for schema related requests.
-   * - ``registry_ca``
-     - ``/path/to/cafile``
-     - Kafka Registry CA certificate, used by Kafka Rest for Avro related requests.
-       If this is set, Kafka Rest will use HTTPS to connect to the registry.
-       If running both in the same process, it should be left to its default value
-   * - ``registry_authfile``
-     - ``/path/to/authfile.json``
-     - Filename to specify users and access control rules for Karapace Schema Registry.
-       If this is set, Schema Segistry requires authentication for most of the endpoints and applies per endpoint authorization rules.
-   * - ``rest_authorization``
-     - ``false``
-     - Use REST API's calling authorization credentials to invoke Kafka operations over SASL authentication of ``sasl_bootstrap_uri`` to delegate REST proxy authorization to Kafka.  If false, then use configured common credentials for all Kafka connections of REST proxy operations.
-   * - ``rest_base_uri``
-     - ``None``
-     - Publicly available URI of this instance advertised to the clients using stateful operations such as creating consumers.  If not set, then construct URI using ``advertised_protocol``, ``advertised_hostname``, and ``advertised_port``.
-   * - ``metadata_max_age_ms``
-     - ``60000``
-     - Period of time in milliseconds after Kafka metadata is force refreshed.
-   * - ``karapace_rest``
-     - ``true``
-     - If the rest part of the app should be included in the starting process
-       At least one of this and ``karapace_registry`` options need to be enabled in order
-       for the service to start
-   * - ``karapace_registry``
-     - ``true``
-     - If the registry part of the app should be included in the starting process
-       At least one of this and ``karapace_rest`` options need to be enabled in order
-       for the service to start
-   * - ``protobuf_runtime_directory``
-     - ``runtime``
-     - Runtime directory for the ``protoc`` protobuf schema parser and code generator
-   * - ``name_strategy``
-     - ``topic_name``
-     - Name strategy to use when storing schemas from the kafka rest proxy service. You can opt between ``topic_name`` , ``record_name`` and ``topic_record_name``
-   * - ``name_strategy_validation``
-     - ``true``
-     - If enabled, validate that given schema is registered under used name strategy when producing messages from Kafka Rest
-   * - ``master_election_strategy``
-     - ``lowest``
-     - Decides on what basis the Karapace cluster master is chosen (only relevant in a multi node setup)
-   * - ``kafka_schema_reader_strict_mode``
-     - ``false``
-     - If enabled, causes the Karapace schema-registry service to shutdown when there are invalid schema records in the `_schemas` topic
-   * - ``kafka_retriable_errors_silenced``
-     - ``true``
-     - If enabled, kafka errors which can be retried or custom errors specififed for the service will not be raised,
-       instead, a warning log is emitted. This will denoise issue tracking systems, i.e. sentry
    * - ``use_protobuf_formatter``
      - ``false``
      - If protobuf formatter should be used on protobuf schemas in order to normalize schemas. The formatter is used on top and independent of regular normalization and schemas will be persisted in a formatted state.
-   * - ``log_handler``
-     - ``stdout``
-     - Select the log handler. Default is standard output. Alternative log handler is ``systemd``.
-   * - ``log_level``
-     - ``DEBUG``
-     - Logging level. Default level is debug.
-   * - ``log_format``
-     - ``%(name)-20s\t%(threadName)s\t%(levelname)-8s\t%(message)s``
-     - Log format
    * - ``waiting_time_before_acting_as_master_ms``
      - ``5000``
      - The time that a master wait before becoming an active master if at the previous round of election wasn't the master (in that case the waiting time its skipped).
@@ -707,13 +737,15 @@ eg. ``Authorization: Bearer $JWT``. If a ``Bearer`` token is present in schema r
 
 Below here is an example of karapace OpenId connect config ::
 
+   sasl_oauthbearer_authentication_enabled: bool = True
    sasl_oauthbearer_jwks_endpoint_url = "http://localhost:8383/realms/karapace/protocol/openid-connect/certs",
    sasl_oauthbearer_expected_issuer = "http://localhost:8383/realms/karapace",
    sasl_oauthbearer_expected_audience = "account",
    sasl_oauthbearer_sub_claim_name = "sub",
 
-  For authorization::
+  For authorization (requires authentication to be enabled)::
 
+   sasl_oauthbearer_authentication_enabled: bool = True
    sasl_oauthbearer_authorization_enabled: bool = False
    sasl_oauthbearer_client_id: str | None = None
    sasl_oauthbearer_roles_claim_path: str | None = None
@@ -722,6 +754,7 @@ Below here is an example of karapace OpenId connect config ::
 
 Below here is an example of karapace OpenId connect docker config ::
 
+    KARAPACE_SASL_OAUTHBEARER_AUTHENTICATION_ENABLED: True
     KARAPACE_SASL_OAUTHBEARER_JWKS_ENDPOINT_URL: http://keycloak:8080/realms/karapace/protocol/openid-connect/certs
     KARAPACE_SASL_OAUTHBEARER_EXPECTED_ISSUER: http://keycloak:8080/realms/karapace
     KARAPACE_SASL_OAUTHBEARER_EXPECTED_AUDIENCE: "account"
@@ -729,11 +762,21 @@ Below here is an example of karapace OpenId connect docker config ::
 
   For authorization, example config::
 
+  KARAPACE_SASL_OAUTHBEARER_AUTHENTICATION_ENABLED: True
   KARAPACE_SASL_OAUTHBEARER_AUTHORIZATION_ENABLED: True
   KARAPACE_SASL_OAUTHBEARER_CLIENT_ID: "karapace"
   KARAPACE_SASL_OAUTHBEARER_ROLES_CLAIM_PATH: "resource_access.[client_id].roles"
   KARAPACE_SASL_OAUTHBEARER_METHOD_ROLES: dict[str, list[str]] = {"GET": ["schema:read", "subject:read"],
                                                            "POST": ["schema:write", "subject:write"], "PUT": [], "DELETE": []}
+
+
+Production hardening notes
+--------------------------
+
+* ``sasl_oauthbearer_jwks_endpoint_url`` must use ``https://``; startup fails otherwise.
+  The ``sasl_oauthbearer_allow_insecure_jwks`` flag overrides this for dev/test only.
+* ``/docs``, ``/redoc``, ``/openapi.json`` bypass the auth gate (by design, for Swagger UI).
+  Block them at the reverse proxy in production to avoid leaking the API surface.
 
 
 Testing the authentication and authorization with docker
