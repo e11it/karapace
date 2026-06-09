@@ -11,8 +11,8 @@ from accept_types import get_best_match
 from collections.abc import Callable
 from http import HTTPStatus
 from karapace.core.config import Config, create_server_ssl_context
-from karapace.statsd import StatsClient
 from karapace.core.utils import json_decode, json_encode
+from karapace.statsd import StatsClient
 from karapace.version import __version__
 from typing import NoReturn, overload
 
@@ -355,7 +355,13 @@ class RestApp:
             headers.update(self.cors_and_server_headers_for_request(request=rapu_request))
 
             if isinstance(data, (dict, list)):
-                resp_bytes = json_encode(data, sort_keys=True, binary=True)
+                # passthrough_datetime: consumed Avro records with logical types contain
+                # datetime/date/time objects that must be formatted by
+                # default_json_serialization ("Z"-suffixed UTC) instead of the JSON
+                # backend's native datetime serialization. This is the only path that
+                # serializes such records; other REST proxy responses carry no datetime
+                # objects, so the flag is a no-op for them.
+                resp_bytes = json_encode(data, sort_keys=True, binary=True, passthrough_datetime=True)
             elif isinstance(data, str):
                 if "Content-Type" not in headers:
                     headers["Content-Type"] = "text/plain; charset=utf-8"

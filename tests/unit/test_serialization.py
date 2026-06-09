@@ -3,36 +3,39 @@ Copyright (c) 2023 Aiven Ltd
 See LICENSE for details
 """
 
-import asyncio
-import base64
-import copy
-import io
-import json
-import logging
-import struct
-from unittest.mock import AsyncMock, Mock, call, patch
-
-import avro
-import pytest
-
 from karapace.core.container import KarapaceContainer
 from karapace.core.schema_models import SchemaType, ValidatedTypedSchema, Versioner
 from karapace.core.serialization import (
+    _schema_needs_logical_conversion,
+    convert_logical_types,
+    flatten_unions,
+    get_subject_name,
     HEADER_FORMAT,
-    START_BYTE,
     InvalidMessageHeader,
     InvalidMessageSchema,
     InvalidPayload,
-    SchemaRetrievalError,
     SchemaRegistryClient,
     SchemaRegistrySerializer,
-    flatten_unions,
-    get_subject_name,
+    SchemaRetrievalError,
     sr_authorization_ctx,
+    START_BYTE,
     write_value,
 )
 from karapace.core.typing import NameStrategy, Subject, SubjectType
 from tests.utils import schema_avro_json, test_objects_avro
+from unittest.mock import AsyncMock, call, Mock, patch
+
+import asyncio
+import avro
+import base64
+import copy
+import datetime
+import decimal
+import io
+import json
+import logging
+import pytest
+import struct
 
 log = logging.getLogger(__name__)
 
@@ -112,6 +115,26 @@ TYPED_PROTOBUF_SCHEMA = ValidatedTypedSchema.parse(
     }\
     """,
 )
+
+NAMESPACED_UNION_SCHEMA = {
+    "type": "record",
+    "name": "Simple",
+    "namespace": "example.avro",
+    "fields": [
+        {
+            "name": "payload",
+            "type": [
+                "null",
+                {
+                    "type": "record",
+                    "name": "Payload",
+                    "namespace": "org.polyus.ipl.ds.erd.doc.asdfasdf.ver1",
+                    "fields": [{"name": "amount", "type": "float"}],
+                },
+            ],
+        }
+    ],
+}
 
 MAP_UNION_AVRO_SCHEMA = ValidatedTypedSchema.parse(
     SchemaType.AVRO,
@@ -225,6 +248,15 @@ def test_flatten_unions_record(record, flattened_record) -> None:
     assert flatten_unions(TYPED_AVRO_SCHEMA.schema, record) == flattened_record
 
 
+def test_flatten_unions_record_short_name_is_legacy_compatible() -> None:
+    """Keep permissive short-name behavior in flatten_unions for backward compatibility."""
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps(NAMESPACED_UNION_SCHEMA))
+    record = {"payload": {"Payload": {"amount": 2.3}}}
+
+    flattened = flatten_unions(typed_schema.schema, record)
+    assert flattened == {"payload": {"amount": 2.3}}
+
+
 def test_flatten_unions_array() -> None:
     typed_schema = ValidatedTypedSchema.parse(
         SchemaType.AVRO,
@@ -284,6 +316,460 @@ def test_flatten_unions_map() -> None:
     record = [{"string": "foo"}, None, {"int": 1}]
     flatten_record = ["foo", None, 1]
     assert flatten_unions(typed_schema.schema, record) == flatten_record
+
+
+@pytest.mark.parametrize(
+    "schema_json,value,expected_type",
+    (
+        ({"type": "long", "logicalType": "timestamp-millis"}, 1_600_000_000_000, "datetime"),
+        ({"type": "long", "logicalType": "timestamp-micros"}, 1_600_000_000_000_000, "datetime"),
+        ({"type": "int", "logicalType": "date"}, 18_000, "date"),
+        ({"type": "int", "logicalType": "time-millis"}, 12 * 60 * 60 * 1000, "time"),
+        ({"type": "long", "logicalType": "time-micros"}, 12 * 60 * 60 * 1_000_000, "time"),
+        ({"type": "bytes", "logicalType": "decimal", "precision": 5, "scale": 2}, "123.45", "decimal"),
+    ),
+)
+def test_convert_logical_types_primitives(schema_json, value, expected_type) -> None:
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps(schema_json))
+    extended = expected_type == "decimal"
+    converted = convert_logical_types(typed_schema.schema, value, extended_json_parser=extended)
+
+    if expected_type == "datetime":
+        assert isinstance(converted, datetime.datetime)
+    elif expected_type == "date":
+        assert isinstance(converted, datetime.date)
+    elif expected_type == "time":
+        assert isinstance(converted, datetime.time)
+    elif expected_type == "decimal":
+        assert isinstance(converted, decimal.Decimal)
+
+
+def test_convert_logical_types_in_record_and_union() -> None:
+    schema = {
+        "type": "record",
+        "name": "TestRecord",
+        "fields": [
+            {
+                "name": "ts",
+                "type": [
+                    "null",
+                    {
+                        "type": "long",
+                        "logicalType": "timestamp-millis",
+                    },
+                ],
+            },
+            {
+                "name": "d",
+                "type": {
+                    "type": "int",
+                    "logicalType": "date",
+                },
+            },
+        ],
+    }
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps(schema))
+    value = {"ts": 1_600_000_000_000, "d": 18_000}
+
+    converted = convert_logical_types(typed_schema.schema, value)
+    assert isinstance(converted["ts"], datetime.datetime)
+    assert isinstance(converted["d"], datetime.date)
+
+
+def test_convert_logical_types_decimal_quantize_int() -> None:
+    schema_json = {
+        "type": "bytes",
+        "logicalType": "decimal",
+        "precision": 10,
+        "scale": 4,
+    }
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps(schema_json))
+    converted = convert_logical_types(typed_schema.schema, 12345, extended_json_parser=True)
+
+    assert isinstance(converted, decimal.Decimal)
+    assert str(converted) == "12345.0000"
+
+
+def test_convert_logical_types_decimal_scale_overflow_raises() -> None:
+    """More fractional digits than the schema scale must be an error, not a silent rounding."""
+    schema_json = {
+        "type": "bytes",
+        "logicalType": "decimal",
+        "precision": 18,
+        "scale": 2,
+    }
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps(schema_json))
+
+    for extended in (False, True):
+        with pytest.raises(InvalidPayload, match="more fractional digits"):
+            convert_logical_types(typed_schema.schema, "12345.123", extended_json_parser=extended)
+
+
+def test_convert_logical_types_decimal_confluent_base64() -> None:
+    schema_json = {
+        "type": "bytes",
+        "logicalType": "decimal",
+        "precision": 10,
+        "scale": 2,
+    }
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps(schema_json))
+    converted = convert_logical_types(typed_schema.schema, "BZw=")
+
+    assert isinstance(converted, decimal.Decimal)
+    assert str(converted) == "14.36"
+
+
+def test_convert_logical_types_decimal_invalid_base64() -> None:
+    """A string that is neither a number nor valid base64 must raise a clear error."""
+    schema_json = {
+        "type": "bytes",
+        "logicalType": "decimal",
+        "precision": 10,
+        "scale": 2,
+    }
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps(schema_json))
+    with pytest.raises(InvalidPayload, match="not a valid decimal value"):
+        convert_logical_types(typed_schema.schema, "not-base64!")
+
+
+def test_convert_logical_types_decimal_numeric_string_default_mode() -> None:
+    """Default (Confluent-compatible) mode must round-trip numeric strings produced by consume."""
+    schema_json = {
+        "type": "bytes",
+        "logicalType": "decimal",
+        "precision": 10,
+        "scale": 2,
+    }
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps(schema_json))
+
+    converted = convert_logical_types(typed_schema.schema, "14.36")
+    assert converted == decimal.Decimal("14.36")
+
+
+def test_convert_logical_types_decimal_digit_string_is_number_not_base64() -> None:
+    """ "1436" is a valid base64 string, but it must be parsed as the number 1436."""
+    schema_json = {
+        "type": "bytes",
+        "logicalType": "decimal",
+        "precision": 10,
+        "scale": 2,
+    }
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps(schema_json))
+
+    converted = convert_logical_types(typed_schema.schema, "1436")
+    assert converted == decimal.Decimal("1436.00")
+
+
+def test_convert_logical_types_decimal_int_default_mode() -> None:
+    schema_json = {
+        "type": "bytes",
+        "logicalType": "decimal",
+        "precision": 10,
+        "scale": 2,
+    }
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps(schema_json))
+
+    converted = convert_logical_types(typed_schema.schema, 1436)
+    assert converted == decimal.Decimal("1436.00")
+
+
+def test_convert_logical_types_decimal_negative_string_and_base64() -> None:
+    schema_json = {
+        "type": "bytes",
+        "logicalType": "decimal",
+        "precision": 10,
+        "scale": 2,
+    }
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps(schema_json))
+
+    assert convert_logical_types(typed_schema.schema, "-7.5") == decimal.Decimal("-7.50")
+    # base64 of two's complement unscaled -750 (b"\xfd\x12")
+    assert convert_logical_types(typed_schema.schema, "/RI=") == decimal.Decimal("-7.50")
+
+
+def test_convert_logical_types_decimal_union_branch_failure_is_not_fatal() -> None:
+    """A failing decimal conversion in one union branch must not break other branches."""
+    schema_json = [
+        {"type": "bytes", "logicalType": "decimal", "precision": 10, "scale": 2},
+        "string",
+    ]
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps(schema_json))
+
+    # Neither numeric nor base64: the decimal branch raises internally, the string branch wins.
+    assert convert_logical_types(typed_schema.schema, "garbage!") == "garbage!"
+
+
+def test_convert_logical_types_decimal_float_is_rejected() -> None:
+    schema_json = {
+        "type": "bytes",
+        "logicalType": "decimal",
+        "precision": 10,
+        "scale": 2,
+    }
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps(schema_json))
+    value = 14.36
+    converted = convert_logical_types(typed_schema.schema, value)
+    assert converted == value
+
+
+_MILLIS_PER_DAY = 86_400_000
+_MICROS_PER_DAY = 86_400_000_000
+_EPOCH = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+
+
+@pytest.mark.parametrize(
+    ("schema_json", "expected"),
+    [
+        ({"type": "record", "name": "R", "fields": [{"name": "a", "type": "int"}]}, False),
+        ({"type": "record", "name": "R", "fields": [{"name": "a", "type": ["null", "string"]}]}, False),
+        ({"type": "record", "name": "R", "fields": [{"name": "a", "type": "bytes"}]}, True),
+        (
+            {"type": "record", "name": "R", "fields": [{"name": "a", "type": {"type": "fixed", "name": "F", "size": 4}}]},
+            True,
+        ),
+        (
+            {
+                "type": "record",
+                "name": "R",
+                "fields": [{"name": "a", "type": {"type": "long", "logicalType": "timestamp-millis"}}],
+            },
+            True,
+        ),
+        (
+            {
+                "type": "record",
+                "name": "R",
+                "fields": [{"name": "a", "type": {"type": "array", "items": {"type": "int", "logicalType": "date"}}}],
+            },
+            True,
+        ),
+        (
+            {
+                "type": "record",
+                "name": "R",
+                "fields": [
+                    {"name": "a", "type": {"type": "map", "values": ["null", {"type": "int", "logicalType": "date"}]}}
+                ],
+            },
+            True,
+        ),
+        ({"type": "array", "items": "string"}, False),
+        ({"type": "string", "logicalType": "uuid"}, True),
+    ],
+)
+def test_schema_needs_logical_conversion_detection(schema_json, expected: bool) -> None:
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps(schema_json))
+    assert _schema_needs_logical_conversion(typed_schema.schema) is expected
+    # The result is memoized on the schema object.
+    assert getattr(typed_schema.schema, "_karapace_needs_logical_conversion") is expected
+
+
+def test_schema_needs_logical_conversion_recursive_schema() -> None:
+    """A record referencing itself must not send the schema walk into infinite recursion."""
+    plain = {
+        "type": "record",
+        "name": "Node",
+        "fields": [
+            {"name": "value", "type": "string"},
+            {"name": "next", "type": ["null", "Node"]},
+        ],
+    }
+    typed_plain = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps(plain))
+    assert _schema_needs_logical_conversion(typed_plain.schema) is False
+
+    with_logical = {
+        "type": "record",
+        "name": "Node",
+        "fields": [
+            {"name": "ts", "type": {"type": "long", "logicalType": "timestamp-millis"}},
+            {"name": "next", "type": ["null", "Node"]},
+        ],
+    }
+    typed_logical = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps(with_logical))
+    assert _schema_needs_logical_conversion(typed_logical.schema) is True
+
+
+def test_write_value_skips_conversion_for_plain_schema(karapace_container: KarapaceContainer) -> None:
+    """The fast path for schemas without logical types must produce identical bytes."""
+    schema_json = {
+        "type": "record",
+        "name": "Plain",
+        "fields": [
+            {"name": "name", "type": "string"},
+            {"name": "maybe", "type": ["null", "string"]},
+        ],
+    }
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps(schema_json))
+    config = karapace_container.config()
+
+    for record in ({"name": "x", "maybe": None}, {"name": "x", "maybe": {"string": "tagged"}}, {"name": "x", "maybe": "y"}):
+        with patch("karapace.core.serialization.convert_logical_types") as mock_convert:
+            buffer = io.BytesIO()
+            write_value(config, typed_schema, buffer, record)
+            mock_convert.assert_not_called()
+        assert buffer.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("logical_type", "base_type", "value"),
+    [
+        ("time-millis", "int", -1),
+        ("time-millis", "int", _MILLIS_PER_DAY),
+        ("time-micros", "long", -1),
+        ("time-micros", "long", _MICROS_PER_DAY),
+    ],
+)
+def test_convert_logical_types_time_out_of_range_raises(logical_type: str, base_type: str, value: int) -> None:
+    """Out-of-range time values must raise instead of silently wrapping around the day."""
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps({"type": base_type, "logicalType": logical_type}))
+    with pytest.raises(InvalidPayload, match=f"not a valid {logical_type} value"):
+        convert_logical_types(typed_schema.schema, value)
+
+
+@pytest.mark.parametrize(
+    ("logical_type", "base_type", "value", "expected"),
+    [
+        ("time-millis", "int", 0, datetime.time(0, 0, 0)),
+        ("time-millis", "int", _MILLIS_PER_DAY - 1, datetime.time(23, 59, 59, 999000)),
+        ("time-micros", "long", 0, datetime.time(0, 0, 0)),
+        ("time-micros", "long", _MICROS_PER_DAY - 1, datetime.time(23, 59, 59, 999999)),
+    ],
+)
+def test_convert_logical_types_time_boundary_values(
+    logical_type: str, base_type: str, value: int, expected: datetime.time
+) -> None:
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps({"type": base_type, "logicalType": logical_type}))
+    assert convert_logical_types(typed_schema.schema, value) == expected
+
+
+def test_convert_logical_types_date_before_epoch() -> None:
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps({"type": "int", "logicalType": "date"}))
+    assert convert_logical_types(typed_schema.schema, -1) == datetime.date(1969, 12, 31)
+    assert convert_logical_types(typed_schema.schema, -719162) == datetime.date(1, 1, 1)
+
+
+def test_convert_logical_types_date_out_of_range_raises() -> None:
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps({"type": "int", "logicalType": "date"}))
+    with pytest.raises(InvalidPayload, match="out of the representable range"):
+        convert_logical_types(typed_schema.schema, 2**31 - 1)
+
+
+def test_convert_logical_types_timestamp_micros_int64_bounds() -> None:
+    """int64 extremes must produce a clear error instead of an unhandled OverflowError."""
+    typed_schema = ValidatedTypedSchema.parse(
+        SchemaType.AVRO, json.dumps({"type": "long", "logicalType": "timestamp-micros"})
+    )
+
+    for value in (2**63 - 1, -(2**63)):
+        with pytest.raises(InvalidPayload, match="out of the representable range"):
+            convert_logical_types(typed_schema.schema, value)
+
+    # Extreme but representable values still convert.
+    max_supported = datetime.datetime(9999, 12, 31, 23, 59, 59, 999999, tzinfo=datetime.timezone.utc)
+    max_micros = (max_supported - _EPOCH) // datetime.timedelta(microseconds=1)
+    converted = convert_logical_types(typed_schema.schema, max_micros)
+    assert converted == max_supported
+
+
+@pytest.mark.parametrize(
+    "schema_json,value,assertion",
+    [
+        (
+            {"type": "long", "logicalType": "timestamp-millis"},
+            "2020-09-13T12:26:40Z",
+            lambda v: (
+                isinstance(v, datetime.datetime)
+                and v == datetime.datetime(2020, 9, 13, 12, 26, 40, tzinfo=datetime.timezone.utc)
+            ),
+        ),
+        (
+            {"type": "long", "logicalType": "timestamp-micros"},
+            "2020-09-13T17:26:40+05:00",
+            lambda v: (
+                isinstance(v, datetime.datetime)
+                and v == datetime.datetime(2020, 9, 13, 12, 26, 40, tzinfo=datetime.timezone.utc)
+            ),
+        ),
+        # Example from Avro spec (https://avro.apache.org/docs/1.12.0/specification/#time_ms):
+        # noon in Helsinki (UTC+2) is shifted to 10:00 UTC → Avro long 946720800000 ms.
+        (
+            {"type": "long", "logicalType": "timestamp-millis"},
+            "2000-01-01T12:00:00+02:00",
+            lambda v: (
+                isinstance(v, datetime.datetime)
+                and v == datetime.datetime(2000, 1, 1, 10, 0, 0, tzinfo=datetime.timezone.utc)
+            ),
+        ),
+        (
+            {"type": "long", "logicalType": "timestamp-micros"},
+            "2000-01-01T12:00:00+02:00",
+            lambda v: (
+                isinstance(v, datetime.datetime)
+                and v == datetime.datetime(2000, 1, 1, 10, 0, 0, tzinfo=datetime.timezone.utc)
+            ),
+        ),
+        (
+            {"type": "long", "logicalType": "timestamp-millis"},
+            "2020-09-13T12:26:40",
+            lambda v: (
+                isinstance(v, datetime.datetime)
+                and v == datetime.datetime(2020, 9, 13, 12, 26, 40, tzinfo=datetime.timezone.utc)
+            ),
+        ),
+        (
+            {"type": "int", "logicalType": "date"},
+            "2019-04-14",
+            lambda v: isinstance(v, datetime.date) and v == datetime.date(2019, 4, 14),
+        ),
+        (
+            {"type": "int", "logicalType": "time-millis"},
+            "12:00:00.123",
+            lambda v: isinstance(v, datetime.time) and v == datetime.time(12, 0, 0, 123000),
+        ),
+        (
+            {"type": "long", "logicalType": "time-micros"},
+            "12:00:00.123456",
+            lambda v: isinstance(v, datetime.time) and v == datetime.time(12, 0, 0, 123456),
+        ),
+    ],
+)
+def test_convert_logical_types_iso8601_extended_parser(schema_json, value, assertion) -> None:
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps(schema_json))
+
+    converted = convert_logical_types(typed_schema.schema, value, extended_json_parser=True)
+    assert assertion(converted)
+
+
+@pytest.mark.parametrize(
+    "schema_json,value",
+    [
+        ({"type": "long", "logicalType": "timestamp-millis"}, "2020-09-13T12:26:40Z"),
+        ({"type": "int", "logicalType": "date"}, "2019-04-14"),
+        ({"type": "long", "logicalType": "time-micros"}, "12:00:00.123456"),
+    ],
+)
+def test_convert_logical_types_iso8601_disabled_returns_original(schema_json, value) -> None:
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps(schema_json))
+
+    converted_disabled = convert_logical_types(typed_schema.schema, value, extended_json_parser=False)
+    assert converted_disabled == value
+
+
+@pytest.mark.parametrize(
+    "schema_json",
+    [
+        {"type": "long", "logicalType": "timestamp-millis"},
+        {"type": "long", "logicalType": "timestamp-micros"},
+        {"type": "int", "logicalType": "date"},
+        {"type": "int", "logicalType": "time-millis"},
+        {"type": "long", "logicalType": "time-micros"},
+    ],
+)
+def test_convert_logical_types_iso8601_invalid_returns_original(schema_json) -> None:
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps(schema_json))
+
+    converted_invalid = convert_logical_types(typed_schema.schema, "not-an-iso", extended_json_parser=True)
+    assert converted_invalid == "not-an-iso"
 
 
 def test_avro_json_write_invalid(karapace_container: KarapaceContainer) -> None:
@@ -381,6 +867,37 @@ def test_avro_json_write_accepts_json_encoded_data_without_tagged_unions(karapac
     write_value(karapace_container.config(), typed_schema, buffer_a, properly_tagged_encoding_b)
     write_value(karapace_container.config(), typed_schema, buffer_b, missing_tag_encoding_b)
     assert buffer_a.getbuffer() == buffer_b.getbuffer()
+
+
+def test_write_value_strict_mode_rejects_shortname_tag(karapace_container: KarapaceContainer) -> None:
+    """In strict mode, namespaced union records must use fullname wrapper keys."""
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps(NAMESPACED_UNION_SCHEMA))
+    # Copy the session-scoped config so the override does not leak to other tests.
+    config = karapace_container.config().model_copy(update={"rest_avro_permissive_json_parser": False})
+    payload = {"payload": {"Payload": {"amount": 2.3}}}
+
+    with pytest.raises(InvalidPayload):
+        write_value(config, typed_schema, io.BytesIO(), payload)
+
+
+def test_write_value_strict_mode_accepts_fullname_tag(karapace_container: KarapaceContainer) -> None:
+    """In strict mode, fullname wrapper keys are accepted for namespaced union records."""
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps(NAMESPACED_UNION_SCHEMA))
+    # Copy the session-scoped config so the override does not leak to other tests.
+    config = karapace_container.config().model_copy(update={"rest_avro_permissive_json_parser": False})
+    payload = {"payload": {"org.polyus.ipl.ds.erd.doc.asdfasdf.ver1.Payload": {"amount": 2.3}}}
+
+    write_value(config, typed_schema, io.BytesIO(), payload)
+
+
+def test_write_value_permissive_mode_still_accepts_shortname_tag(karapace_container: KarapaceContainer) -> None:
+    """Permissive mode keeps short-name compatibility for existing clients."""
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps(NAMESPACED_UNION_SCHEMA))
+    # Copy the session-scoped config so the override does not leak to other tests.
+    config = karapace_container.config().model_copy(update={"rest_avro_permissive_json_parser": True})
+    payload = {"payload": {"Payload": {"amount": 2.3}}}
+
+    write_value(config, typed_schema, io.BytesIO(), payload)
 
 
 async def test_serialization_fails(karapace_container: KarapaceContainer):
