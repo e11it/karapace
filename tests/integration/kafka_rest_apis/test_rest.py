@@ -723,6 +723,58 @@ async def test_publish_with_value_schema_cache_not_cross_subject(
     assert subject_2_latest["id"] == first_schema_id
 
 
+async def test_publish_with_key_schema_cache_not_cross_subject(
+    rest_async_client: Client,
+    registry_async_client: Client,
+    admin_client: KafkaAdminClient,
+) -> None:
+    """The serializer schema cache is keyed by schema string only; publishing the same
+    key schema to a second topic must still register/bind the second topic-key subject."""
+    topic_name_1 = new_topic(admin_client)
+    topic_name_2 = new_topic(admin_client)
+    subject_1 = f"{topic_name_1}-key"
+    subject_2 = f"{topic_name_2}-key"
+
+    await wait_for_topics(rest_async_client, topic_names=[topic_name_1, topic_name_2], timeout=NEW_TOPIC_TIMEOUT, sleep=1)
+
+    key_schema = {
+        "type": "record",
+        "name": "KeySchema1",
+        "fields": [
+            {
+                "name": "name",
+                "type": "string",
+            },
+        ],
+    }
+
+    first_res = await rest_async_client.post(
+        f"/topics/{topic_name_1}",
+        json={"key_schema": json.dumps(key_schema), "records": [{"key": {"name": "First"}}]},
+        headers=REST_HEADERS["avro"],
+    )
+    assert first_res.status_code == 200
+    first_schema_id = first_res.json()["key_schema_id"]
+
+    second_res = await rest_async_client.post(
+        f"/topics/{topic_name_2}",
+        json={"key_schema": json.dumps(key_schema), "records": [{"key": {"name": "Second"}}]},
+        headers=REST_HEADERS["avro"],
+    )
+    assert second_res.status_code == 200
+    second_schema_id = second_res.json()["key_schema_id"]
+    assert second_schema_id == first_schema_id
+
+    subjects = (await registry_async_client.get("subjects")).json()
+    assert subject_1 in subjects
+    assert subject_2 in subjects
+
+    subject_1_latest = (await registry_async_client.get(f"subjects/{subject_1}/versions/latest")).json()
+    subject_2_latest = (await registry_async_client.get(f"subjects/{subject_2}/versions/latest")).json()
+    assert subject_1_latest["id"] == first_schema_id
+    assert subject_2_latest["id"] == first_schema_id
+
+
 async def test_brokers(rest_async_client: Client) -> None:
     res = await rest_async_client.get("/brokers")
     assert res.ok
