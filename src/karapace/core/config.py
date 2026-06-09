@@ -15,7 +15,7 @@ from karapace.core.constants import DEFAULT_AIOHTTP_CLIENT_MAX_SIZE, DEFAULT_PRO
 from karapace.core.typing import ElectionStrategy, NameStrategy
 from karapace.core.utils import json_encode
 from pathlib import Path
-from pydantic import BaseModel, ImportString, PrivateAttr, field_validator
+from pydantic import BaseModel, Field, ImportString, PrivateAttr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 import enum
@@ -25,6 +25,8 @@ import socket
 import ssl
 
 HOSTNAME = socket.gethostname()
+
+log = logging.getLogger(__name__)
 
 
 try:
@@ -132,8 +134,13 @@ class Config(BaseSettings):
     ssl_crlfile: str | None = None
     ssl_password: str | None = None
     sasl_mechanism: str | None = None
+    # OIDC for Schema Registry (OIDCMiddleware). authZ requires authN.
+    sasl_oauthbearer_authentication_enabled: bool = False
     sasl_oauthbearer_authorization_enabled: bool = False
     sasl_oauthbearer_jwks_endpoint_url: str | None = None
+    # Dev/test only — allows http:// JWKS URLs. Plain HTTP lets an in-path attacker swap
+    # the signing keys and forge tokens. Production deployments must leave this false.
+    sasl_oauthbearer_allow_insecure_jwks: bool = False
     sasl_oauthbearer_expected_issuer: str | None = None
     sasl_oauthbearer_expected_audience: str | None = None
     sasl_oauthbearer_sub_claim_name: str | None = "sub"
@@ -141,6 +148,15 @@ class Config(BaseSettings):
     sasl_oauthbearer_roles_claim_path: str | None = None
     sasl_oauthbearer_method_roles: dict[str, list[str]] = {"GET": [], "POST": [], "PUT": [], "DELETE": []}
     sasl_oauthbearer_skip_auth_paths: list[str] = ["/_health", "/metrics"]
+    # Clock-skew tolerance for exp/nbf/iat (seconds). 0 preserves prior strict behavior.
+    sasl_oauthbearer_leeway_seconds: int = Field(default=0, ge=0)
+    # Require header `typ: at+jwt` on access tokens.
+    sasl_oauthbearer_require_access_token_typ: bool = False
+    # Enforce `azp == client_id`. Requires client_id.
+    sasl_oauthbearer_enforce_azp: bool = False
+    # LRU cap on (subject, version, token_fingerprint) in the SR client. Raise for multi-tenant.
+    schema_registry_client_cache_maxsize: int = 100
+    # Kafka SASL client credentials (used by both services; selected by sasl_mechanism).
     sasl_plain_username: str | None = None
     sasl_plain_password: str | None = None
     sasl_oauth_token: str | None = None
@@ -202,6 +218,31 @@ class Config(BaseSettings):
         if isinstance(v, str) and v.lower() == "all":
             return -1
         return v
+
+    @model_validator(mode="after")
+    def _enforce_authn_when_authz_enabled(self) -> Config:
+        # Backwards-compat: prior to splitting authN/authZ, sasl_oauthbearer_authorization_enabled was the
+        # single OIDC switch and implied authentication. Auto-enable authN if only authZ was set, with a
+        # deprecation warning so operators migrate to setting both flags explicitly.
+        if self.sasl_oauthbearer_authorization_enabled and not self.sasl_oauthbearer_authentication_enabled:
+            log.warning(
+                "sasl_oauthbearer_authorization_enabled=true without sasl_oauthbearer_authentication_enabled=true "
+                "is deprecated. Set sasl_oauthbearer_authentication_enabled=true explicitly. "
+                "Auto-enabling authentication for backwards compatibility."
+            )
+            self.sasl_oauthbearer_authentication_enabled = True
+        return self
+
+    @model_validator(mode="after")
+    def _enforce_azp_requires_client_id(self) -> Config:
+        # Catch misconfig at config-parse time, not just middleware construction.
+        # OIDCMiddleware also enforces this defensively for the case where Config is built
+        # directly (e.g. tests) bypassing this validator's failure path.
+        if self.sasl_oauthbearer_enforce_azp and not self.sasl_oauthbearer_client_id:
+            raise ValueError(
+                "OIDC config error: sasl_oauthbearer_client_id is required when " "sasl_oauthbearer_enforce_azp is enabled."
+            )
+        return self
 
     def get_rest_base_uri(self) -> str:
         return (
