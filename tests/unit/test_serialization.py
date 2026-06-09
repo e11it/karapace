@@ -3,36 +3,37 @@ Copyright (c) 2023 Aiven Ltd
 See LICENSE for details
 """
 
-import asyncio
-import base64
-import copy
-import io
-import json
-import logging
-import struct
-from unittest.mock import AsyncMock, Mock, call, patch
-
-import avro
-import pytest
-
 from karapace.core.container import KarapaceContainer
+from karapace.core.dependency import Dependency
 from karapace.core.schema_models import SchemaType, ValidatedTypedSchema, Versioner
+from karapace.core.schema_references import Reference
 from karapace.core.serialization import (
+    flatten_unions,
+    get_subject_name,
     HEADER_FORMAT,
-    START_BYTE,
     InvalidMessageHeader,
     InvalidMessageSchema,
     InvalidPayload,
     SchemaRegistryClient,
     SchemaRegistrySerializer,
     SchemaRetrievalError,
-    flatten_unions,
-    get_subject_name,
     sr_authorization_ctx,
+    START_BYTE,
     write_value,
 )
 from karapace.core.typing import NameStrategy, Subject, SubjectType
 from tests.utils import schema_avro_json, test_objects_avro
+from unittest.mock import AsyncMock, call, Mock, patch
+
+import asyncio
+import avro
+import base64
+import copy
+import io
+import json
+import logging
+import pytest
+import struct
 
 log = logging.getLogger(__name__)
 
@@ -513,6 +514,60 @@ async def test_lookup_schema_raises_on_missing_id_in_success_response() -> None:
 
     with pytest.raises(SchemaRetrievalError):
         await client.lookup_schema(subject=Subject("bad-payload-subject"), schema=TYPED_AVRO_SCHEMA)
+
+
+PROTOBUF_SPEED_SCHEMA_STR = """\
+syntax = "proto3";
+
+message Speed {
+  Enum speed = 1;
+}
+
+enum Enum {
+  HIGH = 0;
+  MIDDLE = 1;
+  LOW = 2;
+}
+"""
+
+PROTOBUF_MESSAGE_WITH_REFERENCE_SCHEMA_STR = """\
+syntax = "proto3";
+
+import "Speed.proto";
+
+message Message {
+  int32 query = 1;
+  Speed speed = 2;
+}
+"""
+
+
+async def test_lookup_schema_protobuf_with_references_serializes_references_in_payload() -> None:
+    """lookup_schema for a PROTOBUF schema with references posts schemaType and serialized references."""
+    reference = Reference(name="Speed.proto", subject=Subject("speed"), version=Versioner.V(1))
+    speed_schema = ValidatedTypedSchema.parse(SchemaType.PROTOBUF, PROTOBUF_SPEED_SCHEMA_STR)
+    dependency = Dependency("Speed.proto", Subject("speed"), Versioner.V(1), speed_schema)
+    proto_schema = ValidatedTypedSchema.parse(
+        SchemaType.PROTOBUF,
+        PROTOBUF_MESSAGE_WITH_REFERENCE_SCHEMA_STR,
+        references=[reference],
+        dependencies={"Speed.proto": dependency},
+    )
+
+    expected_id = 84
+    client = SchemaRegistryClient()
+    client.client = Mock()
+    post_future = asyncio.Future()
+    post_future.set_result(MockLookupResult(status=200, body={"id": expected_id}))
+    client.client.post.return_value = post_future
+
+    schema_id = await client.lookup_schema(subject=Subject("proto-subject"), schema=proto_schema, references=reference)
+
+    assert schema_id == expected_id
+    payload = client.client.post.call_args.kwargs["json"]
+    assert payload["schemaType"] == "PROTOBUF"
+    assert payload["schema"] == str(proto_schema)
+    assert payload["references"] == [{"name": "Speed.proto", "subject": "speed", "version": 1}]
 
 
 async def test_upsert_id_for_schema_uses_lookup_first_when_enabled_and_lookup_hits(

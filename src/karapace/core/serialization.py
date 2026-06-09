@@ -161,7 +161,8 @@ class SchemaRegistryClient:
                 "schemaType": schema.schema_type.value,
             }
             if references:
-                payload["references"] = references.json()
+                # The registry API expects a list of {name, subject, version} objects.
+                payload["references"] = [references.to_dict()]
         else:
             payload = {
                 "schema": json_encode(schema.to_dict()),
