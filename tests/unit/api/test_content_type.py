@@ -67,6 +67,17 @@ def test_missing_content_type_returns_415(method: str) -> None:
     assert exc_info.value.detail == {"error_code": 415, "message": "HTTP 415 Unsupported Media Type"}
 
 
+@pytest.mark.parametrize("content_type", ["", "   "])
+def test_blank_content_type_returns_415(content_type: str) -> None:
+    req = _request("POST", {"Content-Type": content_type})
+
+    with pytest.raises(HTTPException) as exc_info:
+        negotiate_schema_content_type(req)
+
+    assert exc_info.value.status_code == status.HTTP_415_UNSUPPORTED_MEDIA_TYPE
+    assert exc_info.value.detail == {"error_code": 415, "message": "HTTP 415 Unsupported Media Type"}
+
+
 def test_content_type_with_parameters_is_accepted() -> None:
     req = _request("POST", {"Content-Type": f"{JSON_CONTENT_TYPE}; charset=utf-8"})
     assert negotiate_schema_content_type(req) == SCHEMA_RESPONSE_DEFAULT_CONTENT_TYPE
