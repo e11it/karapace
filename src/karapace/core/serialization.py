@@ -803,7 +803,10 @@ def convert_logical_types(schema: avro.schema.Schema, value: Any, extended_json_
         # Timestamps
         if logical_type == "timestamp-millis":
             if isinstance(value, int):
-                return _EPOCH_DATETIME + datetime.timedelta(milliseconds=value)
+                try:
+                    return _EPOCH_DATETIME + datetime.timedelta(milliseconds=value)
+                except OverflowError as e:
+                    raise InvalidPayload(f"{value!r} is out of the representable range for timestamp-millis") from e
             if extended_json_parser and isinstance(value, str):
                 try:
                     parsed = datetime.datetime.fromisoformat(value)
@@ -815,7 +818,10 @@ def convert_logical_types(schema: avro.schema.Schema, value: Any, extended_json_
 
         if logical_type == "timestamp-micros":
             if isinstance(value, int):
-                return _EPOCH_DATETIME + datetime.timedelta(microseconds=value)
+                try:
+                    return _EPOCH_DATETIME + datetime.timedelta(microseconds=value)
+                except OverflowError as e:
+                    raise InvalidPayload(f"{value!r} is out of the representable range for timestamp-micros") from e
             if extended_json_parser and isinstance(value, str):
                 try:
                     parsed = datetime.datetime.fromisoformat(value)
@@ -828,7 +834,10 @@ def convert_logical_types(schema: avro.schema.Schema, value: Any, extended_json_
         # Date
         if logical_type == "date":
             if isinstance(value, int):
-                return _EPOCH_DATE + datetime.timedelta(days=value)
+                try:
+                    return _EPOCH_DATE + datetime.timedelta(days=value)
+                except OverflowError as e:
+                    raise InvalidPayload(f"{value!r} is out of the representable range for date") from e
             if extended_json_parser and isinstance(value, str):
                 try:
                     return datetime.date.fromisoformat(value)
@@ -838,7 +847,11 @@ def convert_logical_types(schema: avro.schema.Schema, value: Any, extended_json_
         # Time
         if logical_type == "time-millis":
             if isinstance(value, int):
-                value = value % _MILLIS_PER_DAY
+                if not 0 <= value < _MILLIS_PER_DAY:
+                    raise InvalidPayload(
+                        f"{value!r} is not a valid time-millis value: expected milliseconds of day "
+                        f"in range [0, {_MILLIS_PER_DAY})"
+                    )
                 seconds, millis = divmod(value, 1000)
                 hours, rem = divmod(seconds, 3600)
                 minutes, seconds = divmod(rem, 60)
@@ -851,7 +864,11 @@ def convert_logical_types(schema: avro.schema.Schema, value: Any, extended_json_
 
         if logical_type == "time-micros":
             if isinstance(value, int):
-                value = value % _MICROS_PER_DAY
+                if not 0 <= value < _MICROS_PER_DAY:
+                    raise InvalidPayload(
+                        f"{value!r} is not a valid time-micros value: expected microseconds of day "
+                        f"in range [0, {_MICROS_PER_DAY})"
+                    )
                 seconds, micros = divmod(value, 1_000_000)
                 hours, rem = divmod(seconds, 3600)
                 minutes, seconds = divmod(rem, 60)

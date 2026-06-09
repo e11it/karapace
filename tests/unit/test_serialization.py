@@ -511,6 +511,72 @@ def test_convert_logical_types_decimal_float_is_rejected() -> None:
     assert converted == value
 
 
+_MILLIS_PER_DAY = 86_400_000
+_MICROS_PER_DAY = 86_400_000_000
+_EPOCH = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+
+
+@pytest.mark.parametrize(
+    ("logical_type", "base_type", "value"),
+    [
+        ("time-millis", "int", -1),
+        ("time-millis", "int", _MILLIS_PER_DAY),
+        ("time-micros", "long", -1),
+        ("time-micros", "long", _MICROS_PER_DAY),
+    ],
+)
+def test_convert_logical_types_time_out_of_range_raises(logical_type: str, base_type: str, value: int) -> None:
+    """Out-of-range time values must raise instead of silently wrapping around the day."""
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps({"type": base_type, "logicalType": logical_type}))
+    with pytest.raises(InvalidPayload, match=f"not a valid {logical_type} value"):
+        convert_logical_types(typed_schema.schema, value)
+
+
+@pytest.mark.parametrize(
+    ("logical_type", "base_type", "value", "expected"),
+    [
+        ("time-millis", "int", 0, datetime.time(0, 0, 0)),
+        ("time-millis", "int", _MILLIS_PER_DAY - 1, datetime.time(23, 59, 59, 999000)),
+        ("time-micros", "long", 0, datetime.time(0, 0, 0)),
+        ("time-micros", "long", _MICROS_PER_DAY - 1, datetime.time(23, 59, 59, 999999)),
+    ],
+)
+def test_convert_logical_types_time_boundary_values(
+    logical_type: str, base_type: str, value: int, expected: datetime.time
+) -> None:
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps({"type": base_type, "logicalType": logical_type}))
+    assert convert_logical_types(typed_schema.schema, value) == expected
+
+
+def test_convert_logical_types_date_before_epoch() -> None:
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps({"type": "int", "logicalType": "date"}))
+    assert convert_logical_types(typed_schema.schema, -1) == datetime.date(1969, 12, 31)
+    assert convert_logical_types(typed_schema.schema, -719162) == datetime.date(1, 1, 1)
+
+
+def test_convert_logical_types_date_out_of_range_raises() -> None:
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps({"type": "int", "logicalType": "date"}))
+    with pytest.raises(InvalidPayload, match="out of the representable range"):
+        convert_logical_types(typed_schema.schema, 2**31 - 1)
+
+
+def test_convert_logical_types_timestamp_micros_int64_bounds() -> None:
+    """int64 extremes must produce a clear error instead of an unhandled OverflowError."""
+    typed_schema = ValidatedTypedSchema.parse(
+        SchemaType.AVRO, json.dumps({"type": "long", "logicalType": "timestamp-micros"})
+    )
+
+    for value in (2**63 - 1, -(2**63)):
+        with pytest.raises(InvalidPayload, match="out of the representable range"):
+            convert_logical_types(typed_schema.schema, value)
+
+    # Extreme but representable values still convert.
+    max_supported = datetime.datetime(9999, 12, 31, 23, 59, 59, 999999, tzinfo=datetime.timezone.utc)
+    max_micros = (max_supported - _EPOCH) // datetime.timedelta(microseconds=1)
+    converted = convert_logical_types(typed_schema.schema, max_micros)
+    assert converted == max_supported
+
+
 @pytest.mark.parametrize(
     "schema_json,value,assertion",
     [
