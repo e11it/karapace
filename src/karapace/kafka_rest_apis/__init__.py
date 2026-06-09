@@ -89,7 +89,9 @@ class KafkaRest(KarapaceBase):
                 "Set rest_authorization=true and configure sasl_bootstrap_uri."
             )
         if self.config.rest_avro_permissive_json_parser:
-            log.warning(
+            # INFO, not WARNING: this is the default configuration and would otherwise
+            # warn on every startup.
+            log.info(
                 "REST proxy starting with permissive Avro JSON parsing enabled "
                 "(rest_avro_permissive_json_parser=true). "
                 "Ambiguous or non-canonical union payloads may be accepted and mapped to an unintended branch. "

@@ -659,7 +659,8 @@ def _unfold_avro_json(
         if len(matching_branches) != 1:
             allowed_tags = sorted({name for branch in schema.schemas for name in get_names(branch)})
             raise InvalidPayload(
-                f"{path}: invalid union tag {tag!r}; expected exactly one of {allowed_tags!r} (got {len(matching_branches)} matches)"
+                f"{path}: invalid union tag {tag!r}; expected exactly one of {allowed_tags!r} "
+                f"(got {len(matching_branches)} matches)"
             )
 
         # Strict path removes the tagged wrapper only when a single branch can
