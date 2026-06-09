@@ -2079,12 +2079,12 @@ async def test_http_headers(registry_async_client: Client) -> None:
     # Giving an invalid Accept value
     res = await registry_async_client.get("subjects", headers={"Accept": "application/vnd.schemaregistry.v2+json"})
     assert res.status_code == 406
-    assert res.json()["message"] == "HTTP 406 Not Acceptable"
+    assert res.json() == {"error_code": 406, "message": "HTTP 406 Not Acceptable"}
 
     # PUT with an invalid Content type
     res = await registry_async_client.put("config", json={"compatibility": "NONE"}, headers={"Content-Type": "text/html"})
     assert res.status_code == 415
-    assert res.json()["message"] == "HTTP 415 Unsupported Media Type"
+    assert res.json() == {"error_code": 415, "message": "HTTP 415 Unsupported Media Type"}
     assert res.headers["Content-Type"] == "application/vnd.schemaregistry.v1+json"
 
     # POST with a body but no Content-Type should fail content negotiation before body validation.
@@ -2107,7 +2107,7 @@ async def test_http_headers(registry_async_client: Client) -> None:
         ssl=registry_async_client.ssl_mode,
     ) as missing_content_type_res:
         assert missing_content_type_res.status == 415
-        assert await missing_content_type_res.json() == {"message": "HTTP 415 Unsupported Media Type"}
+        assert await missing_content_type_res.json() == {"error_code": 415, "message": "HTTP 415 Unsupported Media Type"}
         assert missing_content_type_res.headers["Content-Type"] == "application/vnd.schemaregistry.v1+json"
 
     # Multiple Accept values
@@ -2131,7 +2131,7 @@ async def test_http_headers(registry_async_client: Client) -> None:
     assert res.headers["Content-Type"] == "application/vnd.schemaregistry.v1+json"
     res = await registry_async_client.get("subjects", headers={"Accept": "text/*"})
     assert res.status_code == 406
-    assert res.json()["message"] == "HTTP 406 Not Acceptable"
+    assert res.json() == {"error_code": 406, "message": "HTTP 406 Not Acceptable"}
 
     # Accept without any type works
     res = await registry_async_client.get("subjects", headers={"Accept": "*/does_not_matter"})

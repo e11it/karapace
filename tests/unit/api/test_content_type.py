@@ -48,6 +48,7 @@ def test_post_put_reject_unsupported_content_type(method: str) -> None:
         negotiate_schema_content_type(req)
 
     assert exc_info.value.status_code == status.HTTP_415_UNSUPPORTED_MEDIA_TYPE
+    assert exc_info.value.detail == {"error_code": 415, "message": "HTTP 415 Unsupported Media Type"}
 
 
 def test_get_ignores_content_type_check() -> None:
@@ -63,7 +64,7 @@ def test_missing_content_type_returns_415(method: str) -> None:
         negotiate_schema_content_type(req)
 
     assert exc_info.value.status_code == status.HTTP_415_UNSUPPORTED_MEDIA_TYPE
-    assert exc_info.value.detail == {"message": "HTTP 415 Unsupported Media Type"}
+    assert exc_info.value.detail == {"error_code": 415, "message": "HTTP 415 Unsupported Media Type"}
 
 
 def test_content_type_with_parameters_is_accepted() -> None:
@@ -97,6 +98,7 @@ def test_unsupported_accept_raises_406() -> None:
         negotiate_schema_content_type(req)
 
     assert exc_info.value.status_code == status.HTTP_406_NOT_ACCEPTABLE
+    assert exc_info.value.detail == {"error_code": 406, "message": "HTTP 406 Not Acceptable"}
 
 
 def test_missing_accept_returns_default() -> None:

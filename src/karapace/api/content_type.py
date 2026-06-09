@@ -31,7 +31,18 @@ def _unsupported_media_type() -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
         detail={
+            "error_code": status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
             "message": "HTTP 415 Unsupported Media Type",
+        },
+    )
+
+
+def _not_acceptable() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_406_NOT_ACCEPTABLE,
+        detail={
+            "error_code": status.HTTP_406_NOT_ACCEPTABLE,
+            "message": "HTTP 406 Not Acceptable",
         },
     )
 
@@ -63,11 +74,6 @@ def negotiate_schema_content_type(request: Request) -> str:
         content_type_match = get_best_match(accept_val, SCHEMA_ACCEPT_VALUES)
         if not content_type_match:
             LOG.debug("Unexpected Accept value: %r", accept_val)
-            raise HTTPException(
-                status_code=status.HTTP_406_NOT_ACCEPTABLE,
-                detail={
-                    "message": "HTTP 406 Not Acceptable",
-                },
-            )
+            raise _not_acceptable()
         return content_type_match
     return SCHEMA_RESPONSE_DEFAULT_CONTENT_TYPE

@@ -64,7 +64,7 @@ class TestSchemaRegistryRouteContentNegotiation:
         response = client.get("/config", headers={"Accept": "text/html"})
         assert response.status_code == 406
         assert SCHEMA_RESPONSE_DEFAULT_CONTENT_TYPE in response.headers["Content-Type"]
-        assert response.json()["message"] == "HTTP 406 Not Acceptable"
+        assert response.json() == {"error_code": 406, "message": "HTTP 406 Not Acceptable"}
 
     def test_put_with_invalid_content_type_returns_415(self, client: TestClient) -> None:
         response = client.put(
@@ -74,7 +74,7 @@ class TestSchemaRegistryRouteContentNegotiation:
         )
         assert response.status_code == 415
         assert SCHEMA_RESPONSE_DEFAULT_CONTENT_TYPE in response.headers["Content-Type"]
-        assert response.json()["message"] == "HTTP 415 Unsupported Media Type"
+        assert response.json() == {"error_code": 415, "message": "HTTP 415 Unsupported Media Type"}
 
     def test_put_with_valid_content_type(self, client: TestClient) -> None:
         response = client.put(
