@@ -514,6 +514,92 @@ def test_convert_logical_types_decimal_float_is_rejected() -> None:
     assert converted == value
 
 
+def test_convert_logical_types_bytes_base64_string_round_trips() -> None:
+    """Consume renders bytes as base64; produce must decode the same string back to the same bytes."""
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps("bytes"))
+
+    raw = b"\x01\x02"
+    consumed = base64.b64encode(raw).decode("ascii")  # "AQI="
+    assert convert_logical_types(typed_schema.schema, consumed) == raw
+
+
+def test_convert_logical_types_bytes_latin1_fallback() -> None:
+    """Avro JSON spec strings that are not valid base64 are decoded as latin-1."""
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps("bytes"))
+
+    assert convert_logical_types(typed_schema.schema, "hello!") == b"hello!"
+    assert convert_logical_types(typed_schema.schema, "\x01\x02\xff") == b"\x01\x02\xff"
+
+
+def test_convert_logical_types_bytes_valid_base64_wins_over_latin1() -> None:
+    """A latin-1 string that is also valid base64 is interpreted as base64 (round-trip wins)."""
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps("bytes"))
+
+    assert convert_logical_types(typed_schema.schema, "abcd") == base64.b64decode("abcd")
+
+
+def test_convert_logical_types_bytes_empty_string() -> None:
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps("bytes"))
+
+    assert convert_logical_types(typed_schema.schema, "") == b""
+
+
+def test_convert_logical_types_bytes_invalid_string_raises() -> None:
+    """A string that fits neither base64 nor latin-1 must raise a clear error."""
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps("bytes"))
+
+    with pytest.raises(InvalidPayload, match="not a valid bytes value"):
+        convert_logical_types(typed_schema.schema, "дата")
+
+
+def test_convert_logical_types_bytes_union_branch_failure_is_not_fatal() -> None:
+    """A failing bytes conversion in one union branch must not break other branches."""
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps(["bytes", "string"]))
+
+    # Neither base64 nor latin-1: the bytes branch raises internally, the string branch wins.
+    assert convert_logical_types(typed_schema.schema, "дата") == "дата"
+    # Valid base64 resolves to the bytes branch.
+    assert convert_logical_types(typed_schema.schema, "AQI=") == b"\x01\x02"
+
+
+def test_convert_logical_types_fixed_base64_string_round_trips() -> None:
+    schema_json = {"type": "fixed", "name": "F", "size": 2}
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps(schema_json))
+
+    assert convert_logical_types(typed_schema.schema, "AQI=") == b"\x01\x02"
+
+
+def test_convert_logical_types_fixed_latin1_selected_by_size() -> None:
+    """ "AQID" is valid base64 but decodes to 3 bytes; for fixed(4) the latin-1 reading must win."""
+    schema_json = {"type": "fixed", "name": "F", "size": 4}
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps(schema_json))
+
+    assert convert_logical_types(typed_schema.schema, "AQID") == b"AQID"
+
+
+def test_convert_logical_types_fixed_size_mismatch_raises() -> None:
+    schema_json = {"type": "fixed", "name": "F", "size": 5}
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps(schema_json))
+
+    with pytest.raises(InvalidPayload, match="not a valid fixed value"):
+        convert_logical_types(typed_schema.schema, "abc")
+
+
+def test_convert_logical_types_fixed_decimal_string_is_decimal_not_latin1() -> None:
+    """Strings for fixed-backed decimals must go through decimal conversion, not latin-1 encoding."""
+    schema_json = {
+        "type": "fixed",
+        "name": "F",
+        "size": 2,
+        "logicalType": "decimal",
+        "precision": 4,
+        "scale": 2,
+    }
+    typed_schema = ValidatedTypedSchema.parse(SchemaType.AVRO, json.dumps(schema_json))
+
+    assert convert_logical_types(typed_schema.schema, "14.36") == decimal.Decimal("14.36")
+
+
 _MILLIS_PER_DAY = 86_400_000
 _MICROS_PER_DAY = 86_400_000_000
 _EPOCH = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
@@ -1518,6 +1604,34 @@ async def test_deserialize_converts_empty_avro_bytes_to_empty_base64_strings(
             "items": ["", ""],
         }
     }
+
+
+async def test_avro_bytes_consume_produce_round_trip(karapace_container: KarapaceContainer) -> None:
+    """A record consumed through the REST proxy (bytes as base64) must produce back unchanged."""
+    mock_registry_client = Mock()
+    get_latest_schema_future = asyncio.Future()
+    get_latest_schema_future.set_result((1, AVRO_BYTES_SCHEMA, Versioner.V(1)))
+    mock_registry_client.get_schema.return_value = get_latest_schema_future
+    schema_for_id_one_future = asyncio.Future()
+    schema_for_id_one_future.set_result((AVRO_BYTES_SCHEMA, [Subject("stub")]))
+    mock_registry_client.get_schema_for_id.return_value = schema_for_id_one_future
+
+    serializer = await make_ser_deser(karapace_container, mock_registry_client)
+    schema = await serializer.get_schema_for_subject(Subject("top"))
+    record = {
+        "payload": {
+            "raw": b"\x01\x02",
+            "items": [b"\x03\x04", b"\x05\x06"],
+        }
+    }
+    payload = await serializer.serialize(schema, record)
+    consumed = await serializer.deserialize(payload)
+    assert consumed["payload"]["raw"] == "AQI="
+
+    # Producing the consumed JSON must yield the identical binary payload.
+    reproduced_payload = await serializer.serialize(schema, consumed)
+    assert reproduced_payload == payload
+    assert await serializer.deserialize(reproduced_payload) == consumed
 
 
 @pytest.mark.parametrize(

@@ -817,6 +817,36 @@ def _compute_needs_logical_conversion(schema: avro.schema.Schema, seen: set[int]
     return False
 
 
+def _bytes_from_json_string(value: str, *, fixed_size: int | None = None) -> bytes:
+    """Decode a JSON string for a non-logical bytes/fixed field to raw bytes.
+
+    Base64 is preferred because the consume path renders bytes values as base64,
+    so consumed records can be produced back unchanged; the Avro JSON spec
+    encoding (latin-1) is the fallback. A latin-1 string that also happens to be
+    valid base64 is therefore interpreted as base64. For fixed fields the schema
+    size makes the choice unambiguous: the base64 and latin-1 interpretations of
+    the same string can never both match one size (base64 always decodes to
+    fewer bytes than the string has characters).
+    """
+    try:
+        decoded: bytes | None = base64.b64decode(value, validate=True)
+    except ValueError:
+        decoded = None
+    if decoded is not None and (fixed_size is None or len(decoded) == fixed_size):
+        return decoded
+    try:
+        raw: bytes | None = value.encode("latin-1")
+    except UnicodeEncodeError:
+        raw = None
+    if raw is not None and (fixed_size is None or len(raw) == fixed_size):
+        return raw
+    if fixed_size is not None:
+        raise InvalidPayload(
+            f"{value!r} is not a valid fixed value: expected a base64 or latin-1 string decoding to {fixed_size} bytes"
+        )
+    raise InvalidPayload(f"{value!r} is not a valid bytes value: expected a base64 or latin-1 (code points 0-255) string")
+
+
 def convert_logical_types(schema: avro.schema.Schema, value: Any, extended_json_parser: bool = False) -> Any:
     """Recursively coerce JSON-friendly Avro values to logical Python types.
     https://avro.apache.org/docs/++version++/specification/#logical-types
@@ -841,6 +871,12 @@ def convert_logical_types(schema: avro.schema.Schema, value: Any, extended_json_
           unscaled bytes (e.g. "BZw=" for 14.36 at scale=2) -> decimal.Decimal.
         Strings that are neither numeric nor valid base64 raise InvalidPayload.
         float inputs are intentionally not accepted to avoid silent precision loss.
+
+    Non-logical bytes and fixed fields (both parser modes) accept JSON strings in
+    two encodings: base64 (the format the consume path emits, also used by the
+    Confluent REST proxy v2) is tried first, then the Avro JSON spec latin-1
+    encoding as fallback; see _bytes_from_json_string(). Strings that fit neither
+    encoding raise InvalidPayload.
 
     Args:
         schema: The Avro schema for the current node.
@@ -879,25 +915,26 @@ def convert_logical_types(schema: avro.schema.Schema, value: Any, extended_json_
     if isinstance(schema, avro.schema.MapSchema) and isinstance(value, dict):
         return {k: convert_logical_types(schema.values, v, extended_json_parser) for (k, v) in value.items()}
 
-    # Avro JSON encodes bytes/fixed as JSON strings (code points 0-255 map to unsigned bytes).
-    # Convert such strings to raw bytes before validation for non-logical bytes/fixed.
-    # Logical bytes (e.g. decimal) must continue through logical-type conversion below.
+    # Bytes/fixed JSON strings arrive in one of two encodings: base64 (what the
+    # consume path emits and what the Confluent REST proxy v2 uses) or the Avro
+    # JSON spec encoding (latin-1: code points 0-255 map to unsigned bytes).
+    # Base64 is tried first so that a record consumed through the REST proxy can
+    # be produced back unchanged. Logical bytes/fixed (e.g. decimal) must
+    # continue through logical-type conversion below.
     if (
         isinstance(schema, avro.schema.PrimitiveSchema)
         and not isinstance(schema, avro.schema.LogicalSchema)
         and schema.fullname == "bytes"
         and isinstance(value, str)
     ):
-        try:
-            return value.encode("latin-1")
-        except UnicodeEncodeError:
-            return value
+        return _bytes_from_json_string(value)
 
-    if isinstance(schema, avro.schema.FixedSchema) and isinstance(value, str):
-        try:
-            return value.encode("latin-1")
-        except UnicodeEncodeError:
-            return value
+    if (
+        isinstance(schema, avro.schema.FixedSchema)
+        and not isinstance(schema, avro.schema.LogicalSchema)
+        and isinstance(value, str)
+    ):
+        return _bytes_from_json_string(value, fixed_size=schema.size)
 
     if isinstance(schema, avro.schema.LogicalSchema):
         logical_type = getattr(schema, "logical_type", None)

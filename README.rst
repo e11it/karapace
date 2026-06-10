@@ -698,6 +698,16 @@ Because consume renders ``decimal`` as a numeric string and timestamps as
 produced back unchanged in any parser mode for ``decimal`` fields, and with
 ``rest_avro_extended_json_parser=true`` for the temporal types.
 
+Non-logical ``bytes`` and ``fixed`` fields are rendered as base64 strings when
+consuming (e.g. ``"AQI="`` for ``\x01\x02``), matching the Confluent REST proxy
+v2 format. When producing, strings for these fields are first decoded as
+base64; strings that are not valid base64 fall back to the Avro JSON spec
+encoding (latin-1: code points 0-255 map to unsigned bytes). For ``fixed``
+fields the schema size selects the interpretation unambiguously. A latin-1
+string for a ``bytes`` field that also happens to be valid base64 (e.g.
+``"abcd"``) is interpreted as base64, so consumed records always round-trip.
+Both parser modes behave the same way.
+
 ``local-timestamp-millis`` and ``local-timestamp-micros`` are not supported by
 the Avro library used by Karapace; such fields are handled as plain ``long``
 values.
