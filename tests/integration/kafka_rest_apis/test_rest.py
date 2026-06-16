@@ -389,6 +389,60 @@ async def test_publish_to_nonexisting_topic(rest_async_client: Client) -> None:
             assert res.json()["error_code"] == 40401, "Error code should be for topic not found"
 
 
+async def test_avro_publish_with_lookup_only(
+    rest_async_lookup_first_client: Client,
+    registry_async_client: Client,
+    admin_client: KafkaAdminClient,
+) -> None:
+    """
+    Verify that when schemas are pre-registered and REST proxy is configured
+    to lookup schemas before registering (rest_lookup_schema_before_register=True),
+    producing works in read-only mode against Schema Registry (no new registrations).
+    """
+    tn = new_topic(admin_client)
+    await wait_for_topics(rest_async_lookup_first_client, topic_names=[tn], timeout=NEW_TOPIC_TIMEOUT, sleep=1)
+
+    subject = f"{tn}-value"
+
+    # Pre-register schema under the subject
+    res = await registry_async_client.post(f"subjects/{subject}/versions", json={"schema": schema_avro_json})
+    assert res.ok
+    schema_id = res.json()["id"]
+    assert isinstance(schema_id, int)
+
+    header = REST_HEADERS["avro"]
+    # Use schema text so that REST proxy resolves ID via lookup (POST /subjects/...), not register
+    payload = {"value_schema": schema_avro_json, "records": [{"value": o} for o in test_objects_avro]}
+    res = await rest_async_lookup_first_client.post(f"/topics/{tn}", json=payload, headers=header)
+    check_successful_publish_response(res, test_objects_avro)
+
+
+async def test_avro_publish_with_lookup_first_fallback(
+    rest_async_lookup_first_client: Client,
+    registry_async_client: Client,
+    admin_client: KafkaAdminClient,
+) -> None:
+    """
+    With rest_lookup_schema_before_register=True and schema not in registry,
+    produce triggers lookup (404) then fallback to register; publish succeeds.
+    """
+    tn = new_topic(admin_client)
+    await wait_for_topics(rest_async_lookup_first_client, topic_names=[tn], timeout=NEW_TOPIC_TIMEOUT, sleep=1)
+
+    # Do not pre-register schema; REST will lookup (404) then register
+    header = REST_HEADERS["avro"]
+    payload = {"value_schema": schema_avro_json, "records": [{"value": o} for o in test_objects_avro]}
+    res = await rest_async_lookup_first_client.post(f"/topics/{tn}", json=payload, headers=header)
+    check_successful_publish_response(res, test_objects_avro)
+
+    # Fallback registration should have created the schema in registry
+    subject = f"{tn}-value"
+    versions_res = await registry_async_client.get(f"subjects/{subject}/versions")
+    assert versions_res.ok
+    versions = versions_res.json()
+    assert len(versions) >= 1
+
+
 async def test_publish_with_incompatible_data(
     rest_async_client: Client,
     registry_async_client: Client,
